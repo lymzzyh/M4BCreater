@@ -311,6 +311,12 @@ private struct ChapterEditor: View {
                     Button("保存章节") {
                         coordinator.updateChapters(jobID: job.id, chapters: chapters)
                     }
+
+                    Button {
+                        chapters = normalizeOrders(ChapterSorter.sortedChapters(chapters))
+                    } label: {
+                        Label("自动排序", systemImage: "arrow.up.arrow.down")
+                    }
                 } else {
                     Label("任务已开始，章节和音轨已锁定。", systemImage: "lock")
                         .foregroundStyle(.secondary)
@@ -322,18 +328,26 @@ private struct ChapterEditor: View {
                 ContentUnavailableView("暂无章节", systemImage: "list.number", description: Text("未开始任务可以添加音轨；开始时也会从输入目录自动扫描。"))
                     .frame(minHeight: 120)
             } else {
-                VStack(spacing: 8) {
-                    ForEach(chapters.indices, id: \.self) { index in
-                        ChapterRow(
-                            index: index,
-                            chapter: $chapters[index],
-                            isEditable: job.isEditable,
-                            moveUp: { moveChapter(from: index, to: index - 1) },
-                            moveDown: { moveChapter(from: index, to: index + 1) },
-                            delete: { deleteChapter(at: index) }
-                        )
+                List {
+                    ForEach($chapters) { $chapter in
+                        if let index = chapters.firstIndex(where: { $0.id == chapter.id }) {
+                            ChapterRow(
+                                index: index,
+                                chapter: $chapter,
+                                isEditable: job.isEditable,
+                                moveUp: { moveChapter(from: index, to: index - 1) },
+                                moveDown: { moveChapter(from: index, to: index + 1) },
+                                delete: { deleteChapter(at: index) }
+                            )
+                        }
+                    }
+                    .onMove { source, destination in
+                        guard job.isEditable else { return }
+                        chapters.move(fromOffsets: source, toOffset: destination)
+                        normalizeOrders()
                     }
                 }
+                .frame(minHeight: min(CGFloat(max(chapters.count, 1)) * 42 + 20, 360))
             }
         }
         .onAppear {
@@ -376,7 +390,11 @@ private struct ChapterEditor: View {
     }
 
     private func normalizeOrders() {
-        chapters = chapters.enumerated().map { index, chapter in
+        chapters = normalizeOrders(chapters)
+    }
+
+    private func normalizeOrders(_ input: [Chapter]) -> [Chapter] {
+        input.enumerated().map { index, chapter in
             var copy = chapter
             copy.order = index
             return copy
@@ -394,6 +412,8 @@ private struct ChapterRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(isEditable ? .secondary : .tertiary)
             Text("\(index + 1)")
                 .foregroundStyle(.secondary)
                 .frame(width: 28, alignment: .trailing)

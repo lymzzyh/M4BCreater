@@ -204,7 +204,7 @@ final class ConversionCoordinator: ObservableObject {
             .map { offset, url in
                 Chapter(title: url.deletingPathExtension().lastPathComponent, sourceURL: url, duration: 0, order: start + offset)
             }
-        jobs[index].chapters = normalizedChapters(jobs[index].chapters + additions)
+        jobs[index].chapters = normalizedChapters(ChapterSorter.sortedChapters(jobs[index].chapters + additions))
         jobs[index].updatedAt = Date()
         persist()
     }
@@ -218,7 +218,7 @@ final class ConversionCoordinator: ObservableObject {
             .map { offset, item in
                 Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: start + offset)
             }
-        jobs[index].chapters = normalizedChapters(jobs[index].chapters + additions)
+        jobs[index].chapters = normalizedChapters(ChapterSorter.sortedChapters(jobs[index].chapters + additions))
         jobs[index].updatedAt = Date()
         persist()
     }
@@ -309,7 +309,7 @@ final class ConversionCoordinator: ObservableObject {
         case .webDAV:
             let metadata = BookMetadata(title: fallbackTitle, author: "", narrator: "", album: fallbackTitle, description: "", coverURL: nil)
             do {
-                let items = try await webDAVProvider.list(input).filter { !$0.isDirectory && Self.isAudioFile($0.url) }
+                let items = ChapterSorter.sortedItems(try await webDAVProvider.list(input).filter { !$0.isDirectory && Self.isAudioFile($0.url) })
                 let chapters = normalizedChapters(items.enumerated().map { index, item in
                     Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
                 })

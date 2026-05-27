@@ -25,9 +25,9 @@ final class MetadataService {
 
         let audioFiles = files
             .filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let sortedAudioFiles = ChapterSorter.sortedURLs(audioFiles)
 
-        let chapters = audioFiles.enumerated().map { index, file in
+        let chapters = sortedAudioFiles.enumerated().map { index, file in
             Chapter(
                 title: file.deletingPathExtension().lastPathComponent,
                 sourceURL: file,

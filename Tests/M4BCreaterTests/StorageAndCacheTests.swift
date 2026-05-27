@@ -68,6 +68,29 @@ struct StorageAndCacheTests {
     }
 
     @Test
+    func chapterSorterOrdersArabicAndChineseNumbersNaturally() {
+        let names = [
+            "第十章.m4a",
+            "第2章.m4a",
+            "第十一章.m4a",
+            "第1章.m4a",
+            "第20章.m4a",
+            "第十二章.m4a"
+        ]
+        let urls = names.map { URL(filePath: "/tmp/\($0)") }
+        let sorted = ChapterSorter.sortedURLs(urls).map(\.lastPathComponent)
+
+        #expect(sorted == [
+            "第1章.m4a",
+            "第2章.m4a",
+            "第十章.m4a",
+            "第十一章.m4a",
+            "第十二章.m4a",
+            "第20章.m4a"
+        ])
+    }
+
+    @Test
     func localProviderCopiesFilesForDownloadAndUpload() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let input = root.appending(path: "input", directoryHint: .isDirectory)
