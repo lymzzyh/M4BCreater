@@ -134,6 +134,8 @@ scripts/package-macos.sh
 
 当前项目按 universal binary 使用，支持 Apple Silicon 和 Intel macOS。
 
+这两个二进制文件不会提交到 git。原因是 FFmpeg/ffprobe 体积通常超过 GitHub 的普通文件限制，克隆仓库后需要自行放入上述目录，再执行构建或打包。
+
 FFmpeg/ffprobe 是第三方组件，不属于本项目原创代码。使用、分发或替换 FFmpeg 时，请同时遵守 FFmpeg 及其编译依赖的许可证要求。
 
 ## 项目结构

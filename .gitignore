@@ -5,7 +5,9 @@ dist/
 *.xcuserdata/
 *.xcuserstate
 .DS_Store
+Sources/M4BCreater/Resources/FFmpeg/ffmpeg
 Sources/M4BCreater/Resources/FFmpeg/ffmpeg-arm64
 Sources/M4BCreater/Resources/FFmpeg/ffmpeg-x86_64
+Sources/M4BCreater/Resources/FFmpeg/ffprobe
 Sources/M4BCreater/Resources/FFmpeg/ffprobe-arm64
 Sources/M4BCreater/Resources/FFmpeg/ffprobe-x86_64
