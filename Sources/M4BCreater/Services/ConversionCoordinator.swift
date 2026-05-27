@@ -66,6 +66,11 @@ final class ConversionCoordinator: ObservableObject {
         let title = inputURL.lastPathComponent.isEmpty ? "WebDAV 有声书" : inputURL.lastPathComponent
         let input = StorageLocation(kind: .webDAV, displayName: title, url: inputURL, credentialID: credentialID)
         let output = StorageLocation(kind: outputURL.isFileURL ? .local : .webDAV, displayName: outputURL.lastPathComponent, url: outputURL, credentialID: credentialID)
+        createJob(input: input, output: output)
+    }
+
+    func createJob(input: StorageLocation, output: StorageLocation) {
+        let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
         let metadata = BookMetadata(title: title, author: "", narrator: "", album: title, description: "", coverURL: nil)
         let job = ConversionJob(
             title: title,
@@ -151,16 +156,29 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    func upsertWebDAVCredential(name: String, baseURL: URL, username: String, password: String) {
+    @discardableResult
+    func upsertWebDAVCredential(name: String, baseURL: URL, username: String, password: String) -> UUID {
         let credential = WebDAVCredential(
             name: name,
-            baseURL: baseURL,
+            baseURL: Self.normalizedDirectoryURL(baseURL),
             username: username,
             passwordReference: UUID().uuidString
         )
         credentialStore.upsert(credential, password: password)
         webDAVCredentials.append(credential)
         persist()
+        return credential.id
+    }
+
+    func listWebDAVDirectory(credentialID: UUID, url: URL) async throws -> [StorageItem] {
+        let credential = webDAVCredentials.first { $0.id == credentialID }
+        let location = StorageLocation(
+            kind: .webDAV,
+            displayName: credential?.name ?? url.lastPathComponent,
+            url: Self.normalizedDirectoryURL(url),
+            credentialID: credentialID
+        )
+        return try await webDAVProvider.list(location)
     }
 
     func updateSettings(_ settings: AppSettings) {
@@ -237,7 +255,7 @@ final class ConversionCoordinator: ObservableObject {
                     continue
                 }
                 registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
-                try await webDAVProvider.download(from: item.url, to: localURL) { [weak self] fileProgress in
+                try await webDAVProvider.download(from: item.url, to: localURL, credentialID: job.input.credentialID) { [weak self] fileProgress in
                     Task { @MainActor in
                         let base = Double(position) / Double(max(items.count, 1))
                         let total = 0.08 + (base + fileProgress / Double(max(items.count, 1))) * 0.22
@@ -261,7 +279,7 @@ final class ConversionCoordinator: ObservableObject {
                 }
             }
         case .webDAV:
-            try await webDAVProvider.upload(from: localOutput, to: destination) { [weak self] progress in
+            try await webDAVProvider.upload(from: localOutput, to: destination, credentialID: job.output.credentialID) { [weak self] progress in
                 Task { @MainActor in
                     self?.update(jobID: job.id, stage: .writingOutput, total: 0.92 + progress * 0.08, currentItem: "上传 WebDAV")
                 }
@@ -327,6 +345,16 @@ final class ConversionCoordinator: ObservableObject {
         let sanitized = value.components(separatedBy: invalid).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return sanitized.isEmpty ? "Audiobook" : sanitized
+    }
+
+    static func normalizedDirectoryURL(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        if !components.path.hasSuffix("/") {
+            components.path += "/"
+        }
+        return components.url ?? url
     }
 }
 

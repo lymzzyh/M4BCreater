@@ -79,10 +79,14 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
     }
 
     func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try await download(from: remoteURL, to: localURL, credentialID: nil, progress: progress)
+    }
+
+    func download(from remoteURL: URL, to localURL: URL, credentialID: UUID?, progress: @escaping @Sendable (Double) -> Void) async throws {
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         var request = URLRequest(url: remoteURL)
         request.httpMethod = "GET"
-        applyAuthorization(to: &request, credentialID: nil)
+        applyAuthorization(to: &request, credentialID: credentialID)
         let (tempURL, response) = try await session.download(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw StorageError.invalidResponse
@@ -95,9 +99,13 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
     }
 
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try await upload(from: localURL, to: remoteURL, credentialID: nil, progress: progress)
+    }
+
+    func upload(from localURL: URL, to remoteURL: URL, credentialID: UUID?, progress: @escaping @Sendable (Double) -> Void) async throws {
         var request = URLRequest(url: remoteURL)
         request.httpMethod = "PUT"
-        applyAuthorization(to: &request, credentialID: nil)
+        applyAuthorization(to: &request, credentialID: credentialID)
         let (_, response) = try await session.upload(for: request, fromFile: localURL)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw StorageError.invalidResponse
