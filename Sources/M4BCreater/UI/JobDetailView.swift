@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
 struct JobDetailView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     var job: ConversionJob
@@ -216,6 +217,7 @@ struct JobDetailView: View {
     }
 }
 
+@MainActor
 private struct MetadataEditor: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     var job: ConversionJob
@@ -301,6 +303,7 @@ private struct MetadataEditor: View {
     }
 }
 
+@MainActor
 private struct CoverPicker: View {
     @Binding var metadata: BookMetadata
     var isEditable: Bool
@@ -361,6 +364,7 @@ private struct CoverPicker: View {
     }
 }
 
+@MainActor
 private struct EncodingEditor: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     var job: ConversionJob
@@ -402,6 +406,7 @@ private struct EncodingEditor: View {
     }
 }
 
+@MainActor
 private struct ChapterEditor: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     var job: ConversionJob
@@ -443,7 +448,7 @@ private struct ChapterEditor: View {
                 ContentUnavailableView("暂无章节", systemImage: "list.number", description: Text("未开始任务可以添加音轨；开始时也会从输入目录自动扫描。"))
                     .frame(minHeight: 120)
             } else {
-                List {
+                LazyVStack(spacing: 6) {
                     ForEach($chapters) { $chapter in
                         if let index = chapters.firstIndex(where: { $0.id == chapter.id }) {
                             ChapterRow(
@@ -454,15 +459,21 @@ private struct ChapterEditor: View {
                                 moveDown: { moveChapter(from: index, to: index + 1) },
                                 delete: { deleteChapter(at: index) }
                             )
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.08))
+                            )
+                            .draggable(job.isEditable ? chapter.id.uuidString : "")
+                            .dropDestination(for: String.self) { values, _ in
+                                guard job.isEditable, let value = values.first, let id = UUID(uuidString: value) else { return false }
+                                moveChapter(sourceID: id, destinationID: chapter.id)
+                                return true
+                            }
                         }
                     }
-                    .onMove { source, destination in
-                        guard job.isEditable else { return }
-                        chapters.move(fromOffsets: source, toOffset: destination)
-                        normalizeOrders()
-                    }
                 }
-                .frame(minHeight: min(CGFloat(max(chapters.count, 1)) * 42 + 20, 360))
             }
         }
         .onAppear {
@@ -501,6 +512,17 @@ private struct ChapterEditor: View {
         normalizeOrders()
     }
 
+    private func moveChapter(sourceID: UUID, destinationID: UUID) {
+        guard
+            let source = chapters.firstIndex(where: { $0.id == sourceID }),
+            let destination = chapters.firstIndex(where: { $0.id == destinationID }),
+            source != destination
+        else {
+            return
+        }
+        moveChapter(from: source, to: destination)
+    }
+
     private func deleteChapter(at index: Int) {
         guard chapters.indices.contains(index) else { return }
         chapters.remove(at: index)
@@ -525,6 +547,7 @@ private struct ChapterEditor: View {
     }
 }
 
+@MainActor
 private struct ChapterRow: View {
     var index: Int
     @Binding var chapter: Chapter
@@ -564,6 +587,7 @@ private struct ChapterRow: View {
     }
 }
 
+@MainActor
 private struct WebDAVTrackPicker: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     @Environment(\.dismiss) private var dismiss
@@ -633,6 +657,7 @@ private struct WebDAVTrackPicker: View {
     }
 }
 
+@MainActor
 private struct PathRow: View {
     var title: String
     var kind: String
@@ -655,6 +680,7 @@ private struct PathRow: View {
     }
 }
 
+@MainActor
 private struct MetricView: View {
     var title: String
     var value: String
@@ -672,6 +698,7 @@ private struct MetricView: View {
     }
 }
 
+@MainActor
 private struct Panel<Content: View>: View {
     var title: String
     var icon: String

@@ -1,10 +1,12 @@
 import SwiftUI
 
+@MainActor
 struct ContentView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     @State private var showingNewJob = false
 
     var body: some View {
+        let selectedJob = coordinator.selectedJob
         NavigationSplitView {
             SidebarView(showingNewJob: $showingNewJob)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
@@ -12,7 +14,7 @@ struct ContentView: View {
             JobListView()
                 .navigationSplitViewColumnWidth(min: 320, ideal: 390)
         } detail: {
-            if let job = coordinator.selectedJob {
+            if let job = selectedJob {
                 JobDetailView(job: job)
             } else {
                 EmptyStateView()
@@ -25,6 +27,7 @@ struct ContentView: View {
     }
 }
 
+@MainActor
 private struct SidebarView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     @Binding var showingNewJob: Bool
@@ -58,6 +61,7 @@ private struct SidebarView: View {
     }
 }
 
+@MainActor
 private struct SidebarMetric: View {
     var title: String
     var value: String
@@ -77,23 +81,34 @@ private struct SidebarMetric: View {
     }
 }
 
+@MainActor
 private struct JobListView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     @State private var pendingDeleteJobID: UUID?
 
     var body: some View {
-        List(selection: $coordinator.selectedJobID) {
-            ForEach(coordinator.jobs) { job in
-                JobRowView(job: job)
-                    .tag(job.id)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            pendingDeleteJobID = job.id
-                        } label: {
-                            Label("删除任务", systemImage: "trash")
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(coordinator.jobs) { job in
+                    JobRowView(job: job)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background(rowBackground(for: job))
+                        .onTapGesture {
+                            coordinator.selectedJobID = job.id
                         }
-                    }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                pendingDeleteJobID = job.id
+                            } label: {
+                                Label("删除任务", systemImage: "trash")
+                            }
+                        }
+                }
             }
+            .padding(12)
         }
         .confirmationDialog("删除任务？", isPresented: Binding(
             get: { pendingDeleteJobID != nil },
@@ -118,8 +133,20 @@ private struct JobListView: View {
         }
         .navigationTitle("任务队列")
     }
+
+    @ViewBuilder
+    private func rowBackground(for job: ConversionJob) -> some View {
+        if coordinator.selectedJobID == job.id {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(0.16))
+        } else {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.clear)
+        }
+    }
 }
 
+@MainActor
 private struct JobRowView: View {
     var job: ConversionJob
 
@@ -158,6 +185,7 @@ private struct JobRowView: View {
     }
 }
 
+@MainActor
 private struct EmptyStateView: View {
     var body: some View {
         ContentUnavailableView(
