@@ -97,6 +97,36 @@ struct BookMetadata: Codable, Hashable {
     )
 }
 
+enum AudioCodec: String, Codable, CaseIterable, Identifiable {
+    case aac
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .aac: "AAC"
+        }
+    }
+
+    var ffmpegName: String {
+        switch self {
+        case .aac: "aac"
+        }
+    }
+}
+
+struct EncodingSettings: Codable, Hashable {
+    var codec: AudioCodec = .aac
+    var bitrateKbps: Int = 64
+
+    static let availableBitrates = [32, 48, 64, 96, 128, 160, 192, 256, 320]
+    static let `default` = EncodingSettings()
+
+    var bitrateLabel: String {
+        "\(bitrateKbps) kbps"
+    }
+}
+
 struct Chapter: Codable, Hashable, Identifiable {
     var id: UUID = UUID()
     var title: String
@@ -142,13 +172,94 @@ struct ConversionJob: Codable, Identifiable, Hashable {
     var stage: JobStage = .created
     var progress: ConversionProgress = ConversionProgress()
     var cacheEntries: [CacheEntry] = []
+    var encodingSettings: EncodingSettings = .default
+    var hasStarted: Bool = false
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
     var outputFileName: String
     var errorMessage: String?
 
+    init(
+        id: UUID = UUID(),
+        title: String,
+        input: StorageLocation,
+        output: StorageLocation,
+        metadata: BookMetadata,
+        chapters: [Chapter] = [],
+        state: JobState = .queued,
+        stage: JobStage = .created,
+        progress: ConversionProgress = ConversionProgress(),
+        cacheEntries: [CacheEntry] = [],
+        encodingSettings: EncodingSettings = .default,
+        hasStarted: Bool = false,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        outputFileName: String,
+        errorMessage: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.input = input
+        self.output = output
+        self.metadata = metadata
+        self.chapters = chapters
+        self.state = state
+        self.stage = stage
+        self.progress = progress
+        self.cacheEntries = cacheEntries
+        self.encodingSettings = encodingSettings
+        self.hasStarted = hasStarted
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.outputFileName = outputFileName
+        self.errorMessage = errorMessage
+    }
+
     var usesWebDAV: Bool {
         input.kind == .webDAV || output.kind == .webDAV
+    }
+
+    var isEditable: Bool {
+        !hasStarted && state == .queued
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case input
+        case output
+        case metadata
+        case chapters
+        case state
+        case stage
+        case progress
+        case cacheEntries
+        case encodingSettings
+        case hasStarted
+        case createdAt
+        case updatedAt
+        case outputFileName
+        case errorMessage
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decode(String.self, forKey: .title)
+        input = try container.decode(StorageLocation.self, forKey: .input)
+        output = try container.decode(StorageLocation.self, forKey: .output)
+        metadata = try container.decode(BookMetadata.self, forKey: .metadata)
+        chapters = try container.decodeIfPresent([Chapter].self, forKey: .chapters) ?? []
+        state = try container.decodeIfPresent(JobState.self, forKey: .state) ?? .queued
+        stage = try container.decodeIfPresent(JobStage.self, forKey: .stage) ?? .created
+        progress = try container.decodeIfPresent(ConversionProgress.self, forKey: .progress) ?? ConversionProgress()
+        cacheEntries = try container.decodeIfPresent([CacheEntry].self, forKey: .cacheEntries) ?? []
+        encodingSettings = try container.decodeIfPresent(EncodingSettings.self, forKey: .encodingSettings) ?? .default
+        hasStarted = try container.decodeIfPresent(Bool.self, forKey: .hasStarted) ?? (state != .queued)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        outputFileName = try container.decode(String.self, forKey: .outputFileName)
+        errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
     }
 }
 

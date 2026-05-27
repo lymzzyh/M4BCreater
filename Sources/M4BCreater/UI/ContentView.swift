@@ -89,13 +89,37 @@ private struct SidebarMetric: View {
 
 private struct JobListView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
+    @State private var pendingDeleteJobID: UUID?
 
     var body: some View {
         List(selection: $coordinator.selectedJobID) {
             ForEach(coordinator.jobs) { job in
                 JobRowView(job: job)
                     .tag(job.id)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            pendingDeleteJobID = job.id
+                        } label: {
+                            Label("删除任务", systemImage: "trash")
+                        }
+                    }
             }
+        }
+        .confirmationDialog("删除任务？", isPresented: Binding(
+            get: { pendingDeleteJobID != nil },
+            set: { if !$0 { pendingDeleteJobID = nil } }
+        )) {
+            Button("删除任务", role: .destructive) {
+                if let pendingDeleteJobID {
+                    coordinator.deleteJob(jobID: pendingDeleteJobID)
+                }
+                pendingDeleteJobID = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteJobID = nil
+            }
+        } message: {
+            Text("会删除任务记录和缓存工作区，不会删除输入源文件或已输出的 M4B。")
         }
         .overlay {
             if coordinator.jobs.isEmpty {

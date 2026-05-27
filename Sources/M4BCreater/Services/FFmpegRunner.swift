@@ -35,6 +35,54 @@ final class FFmpegRunner {
         jobID: UUID,
         sources: [URL],
         metadata: BookMetadata,
+        encodingSettings: EncodingSettings = .default,
+        outputURL: URL,
+        progress: @escaping @Sendable (FFmpegProgress) -> Void
+    ) async throws {
+        let chapters = sources.enumerated().map { index, source in
+            Chapter(title: source.deletingPathExtension().lastPathComponent, sourceURL: source, duration: 0, order: index)
+        }
+        try await packageM4B(
+            jobID: jobID,
+            intermediateTracks: sources,
+            chapters: chapters,
+            metadata: metadata,
+            encodingSettings: encodingSettings,
+            outputURL: outputURL,
+            progress: progress
+        )
+    }
+
+    func transcodeTrack(
+        jobID: UUID,
+        sourceURL: URL,
+        outputURL: URL,
+        encodingSettings: EncodingSettings,
+        progress: @escaping @Sendable (FFmpegProgress) -> Void
+    ) async throws -> URL {
+        guard let ffmpeg = bundledFFmpegURL() else {
+            throw FFmpegError.missingBinary
+        }
+        try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let arguments = [
+            "-hide_banner",
+            "-y",
+            "-i", sourceURL.path(percentEncoded: false),
+            "-vn",
+            "-c:a", encodingSettings.codec.ffmpegName,
+            "-b:a", "\(encodingSettings.bitrateKbps)k",
+            outputURL.path(percentEncoded: false)
+        ]
+        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progress: progress)
+        return outputURL
+    }
+
+    func packageM4B(
+        jobID: UUID,
+        intermediateTracks: [URL],
+        chapters: [Chapter],
+        metadata: BookMetadata,
+        encodingSettings: EncodingSettings,
         outputURL: URL,
         progress: @escaping @Sendable (FFmpegProgress) -> Void
     ) async throws {
@@ -42,25 +90,29 @@ final class FFmpegRunner {
             throw FFmpegError.missingBinary
         }
         let listURL = outputURL.deletingLastPathComponent().appending(path: "concat-\(jobID.uuidString).txt")
-        let listBody = sources.map { "file '\($0.path(percentEncoded: false).replacingOccurrences(of: "'", with: "'\\''"))'" }
+        let listBody = intermediateTracks.map { "file '\(Self.escapeConcatPath($0))'" }
             .joined(separator: "\n")
         try listBody.write(to: listURL, atomically: true, encoding: .utf8)
+        let metadataURL = outputURL.deletingLastPathComponent().appending(path: "metadata-\(jobID.uuidString).txt")
+        let durations = await durations(for: intermediateTracks)
+        let ffmetadata = Self.buildFFMetadata(metadata: metadata, chapters: chapters, durations: durations)
+        try ffmetadata.write(to: metadataURL, atomically: true, encoding: .utf8)
 
         var arguments = [
             "-hide_banner",
             "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", listURL.path(percentEncoded: false)
+            "-i", listURL.path(percentEncoded: false),
+            "-i", metadataURL.path(percentEncoded: false)
         ]
         if let coverURL = metadata.coverURL {
-            arguments += ["-i", coverURL.path(percentEncoded: false), "-map", "0:a", "-map", "1:v", "-disposition:v:0", "attached_pic"]
+            arguments += ["-i", coverURL.path(percentEncoded: false), "-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-map", "2:v", "-disposition:v:0", "attached_pic"]
         } else {
-            arguments += ["-vn"]
+            arguments += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-vn"]
         }
         arguments += [
-            "-c:a", "aac",
-            "-b:a", "64k",
+            "-c:a", "copy",
             "-movflags", "+faststart",
             "-metadata", "title=\(metadata.title)",
             "-metadata", "artist=\(metadata.author)",
@@ -68,6 +120,18 @@ final class FFmpegRunner {
             outputURL.path(percentEncoded: false)
         ]
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progress: progress)
+    }
+
+    func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
+        [
+            "-hide_banner",
+            "-y",
+            "-i", sourceURL.path(percentEncoded: false),
+            "-vn",
+            "-c:a", encodingSettings.codec.ffmpegName,
+            "-b:a", "\(encodingSettings.bitrateKbps)k",
+            outputURL.path(percentEncoded: false)
+        ]
     }
 
     func pause(jobID: UUID) {
@@ -127,6 +191,71 @@ final class FFmpegRunner {
         let speed = line.components(separatedBy: "speed=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
         let time = line.components(separatedBy: "time=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
         return FFmpegProgress(total: 0, currentFile: 0, speed: speed, eta: time, currentItem: "FFmpeg", logLine: line)
+    }
+
+    private func durations(for urls: [URL]) async -> [TimeInterval] {
+        var result: [TimeInterval] = []
+        for url in urls {
+            result.append((try? await probeDuration(url)) ?? 0)
+        }
+        return result
+    }
+
+    private func probeDuration(_ url: URL) async throws -> TimeInterval {
+        guard let ffprobe = bundledFFprobeURL() else {
+            return 0
+        }
+        let process = Process()
+        process.executableURL = ffprobe
+        process.arguments = [
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            url.path(percentEncoded: false)
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return 0 }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        return TimeInterval(text) ?? 0
+    }
+
+    private static func escapeConcatPath(_ url: URL) -> String {
+        url.path(percentEncoded: false).replacingOccurrences(of: "'", with: "'\\''")
+    }
+
+    private static func buildFFMetadata(metadata: BookMetadata, chapters: [Chapter], durations: [TimeInterval]) -> String {
+        var lines = [";FFMETADATA1"]
+        lines.append("title=\(escapeMetadata(metadata.title))")
+        lines.append("artist=\(escapeMetadata(metadata.author))")
+        lines.append("album=\(escapeMetadata(metadata.album.isEmpty ? metadata.title : metadata.album))")
+
+        var startMS = 0
+        let ordered = chapters.sorted { $0.order < $1.order }
+        for (index, chapter) in ordered.enumerated() {
+            let duration = durations.indices.contains(index) ? durations[index] : chapter.duration
+            let endMS = startMS + max(Int(duration * 1000), 1)
+            lines.append("[CHAPTER]")
+            lines.append("TIMEBASE=1/1000")
+            lines.append("START=\(startMS)")
+            lines.append("END=\(endMS)")
+            lines.append("title=\(escapeMetadata(chapter.title))")
+            startMS = endMS
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func escapeMetadata(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "=", with: "\\=")
+            .replacingOccurrences(of: ";", with: "\\;")
+            .replacingOccurrences(of: "#", with: "\\#")
     }
 
     private func bundledExecutableURL(named name: String) -> URL? {

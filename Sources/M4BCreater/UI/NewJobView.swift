@@ -11,6 +11,7 @@ struct NewJobView: View {
     @State private var useWebDAVInput = false
     @State private var useWebDAVOutput = false
     @State private var browserPurpose: WebDAVBrowserPurpose?
+    @State private var encodingSettings: EncodingSettings = .default
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -46,6 +47,19 @@ struct NewJobView: View {
             } else {
                 DirectoryPickerRow(title: "输出目录", url: outputURL) {
                     outputURL = Self.pickDirectory()
+                }
+            }
+
+            HStack(spacing: 16) {
+                Picker("编码", selection: $encodingSettings.codec) {
+                    ForEach(AudioCodec.allCases) { codec in
+                        Text(codec.label).tag(codec)
+                    }
+                }
+                Picker("码率", selection: $encodingSettings.bitrateKbps) {
+                    ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
+                        Text("\(bitrate) kbps").tag(bitrate)
+                    }
                 }
             }
 
@@ -88,9 +102,9 @@ struct NewJobView: View {
     private func create() {
         guard let input = selectedInputLocation, let output = selectedOutputLocation else { return }
         if input.kind == .local, output.kind == .local {
-            coordinator.createLocalJob(inputURL: input.url, outputURL: output.url)
+            coordinator.createLocalJob(inputURL: input.url, outputURL: output.url, encodingSettings: encodingSettings)
         } else {
-            coordinator.createJob(input: input, output: output)
+            coordinator.createJob(input: input, output: output, encodingSettings: encodingSettings)
         }
     }
 

@@ -17,6 +17,57 @@ struct StorageAndCacheTests {
     }
 
     @Test
+    func transcodeArgumentsUseSelectedHighBitrate() {
+        let runner = FFmpegRunner()
+        let args = runner.ffmpegArgumentsForTranscode(
+            sourceURL: URL(filePath: "/tmp/input.mp3"),
+            outputURL: URL(filePath: "/tmp/output.m4a"),
+            encodingSettings: EncodingSettings(codec: .aac, bitrateKbps: 320)
+        )
+
+        #expect(args.contains("aac"))
+        #expect(args.contains("320k"))
+    }
+
+    @Test
+    func legacyJobDecodingDefaultsEncodingAndLockState() throws {
+        let json = """
+        {
+          "id": "\(UUID().uuidString)",
+          "title": "Legacy",
+          "input": {
+            "id": "\(UUID().uuidString)",
+            "kind": "local",
+            "displayName": "in",
+            "url": "file:///tmp/in/"
+          },
+          "output": {
+            "id": "\(UUID().uuidString)",
+            "kind": "local",
+            "displayName": "out",
+            "url": "file:///tmp/out/"
+          },
+          "metadata": {
+            "title": "Legacy",
+            "author": "",
+            "narrator": "",
+            "album": "Legacy",
+            "description": ""
+          },
+          "state": "running",
+          "stage": "transcoding",
+          "outputFileName": "Legacy.m4b"
+        }
+        """
+        let job = try JSONDecoder.app.decode(ConversionJob.self, from: Data(json.utf8))
+
+        #expect(job.encodingSettings.codec == .aac)
+        #expect(job.encodingSettings.bitrateKbps == 64)
+        #expect(job.hasStarted)
+        #expect(!job.isEditable)
+    }
+
+    @Test
     func localProviderCopiesFilesForDownloadAndUpload() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let input = root.appending(path: "input", directoryHint: .isDirectory)

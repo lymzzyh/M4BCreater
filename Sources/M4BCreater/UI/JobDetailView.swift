@@ -1,8 +1,11 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct JobDetailView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     var job: ConversionJob
+    @State private var showingDeleteConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -10,6 +13,8 @@ struct JobDetailView: View {
                 header
                 progressPanel
                 metadataPanel
+                encodingPanel
+                chaptersPanel
                 pathPanel
                 cachePanel
                 logPanel
@@ -18,6 +23,14 @@ struct JobDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle(job.title)
+        .confirmationDialog("删除任务？", isPresented: $showingDeleteConfirmation) {
+            Button("删除任务", role: .destructive) {
+                coordinator.deleteJob(jobID: job.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会删除任务记录和缓存工作区，不会删除输入源文件或已输出的 M4B。")
+        }
     }
 
     private var header: some View {
@@ -36,6 +49,7 @@ struct JobDetailView: View {
                 } label: {
                     Label("刮削", systemImage: "sparkle.magnifyingglass")
                 }
+                .disabled(!job.isEditable)
                 Button {
                     if job.state == .running {
                         coordinator.pause(jobID: job.id)
@@ -48,6 +62,11 @@ struct JobDetailView: View {
                     Label(primaryActionTitle, systemImage: primaryActionIcon)
                 }
                 .buttonStyle(.borderedProminent)
+                Button {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
                 Button {
                     coordinator.cancel(jobID: job.id)
                 } label: {
@@ -83,6 +102,18 @@ struct JobDetailView: View {
     private var metadataPanel: some View {
         Panel(title: "元数据", icon: "book.closed") {
             MetadataEditor(job: job)
+        }
+    }
+
+    private var encodingPanel: some View {
+        Panel(title: "编码", icon: "slider.horizontal.3") {
+            EncodingEditor(job: job)
+        }
+    }
+
+    private var chaptersPanel: some View {
+        Panel(title: "章节", icon: "list.number") {
+            ChapterEditor(job: job)
         }
     }
 
@@ -163,27 +194,42 @@ private struct MetadataEditor: View {
     @State private var metadata: BookMetadata = .empty
 
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
-            GridRow {
-                Text("标题")
-                TextField("标题", text: $metadata.title)
+        VStack(alignment: .leading, spacing: 12) {
+            if !job.isEditable {
+                Label("任务已开始，元数据已锁定。", systemImage: "lock")
+                    .foregroundStyle(.secondary)
             }
-            GridRow {
-                Text("作者")
-                TextField("作者", text: $metadata.author)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    Text("标题")
+                    TextField("标题", text: $metadata.title)
+                }
+                GridRow {
+                    Text("作者")
+                    TextField("作者", text: $metadata.author)
+                }
+                GridRow {
+                    Text("旁白")
+                    TextField("旁白", text: $metadata.narrator)
+                }
+                GridRow {
+                    Text("专辑")
+                    TextField("专辑", text: $metadata.album)
+                }
+                GridRow {
+                    Text("简介")
+                    TextField("简介", text: $metadata.description, axis: .vertical)
+                        .lineLimit(3...6)
+                }
             }
-            GridRow {
-                Text("旁白")
-                TextField("旁白", text: $metadata.narrator)
-            }
-            GridRow {
-                Text("专辑")
-                TextField("专辑", text: $metadata.album)
-            }
-            GridRow {
-                Text("简介")
-                TextField("简介", text: $metadata.description, axis: .vertical)
-                    .lineLimit(3...6)
+            .disabled(!job.isEditable)
+
+            HStack {
+                Spacer()
+                Button("保存元数据") {
+                    coordinator.updateMetadata(for: job.id, metadata: metadata)
+                }
+                .disabled(!job.isEditable)
             }
         }
         .onAppear {
@@ -192,9 +238,253 @@ private struct MetadataEditor: View {
         .onChange(of: job.id) {
             metadata = job.metadata
         }
-        .toolbar {
-            Button("保存元数据") {
-                coordinator.updateMetadata(for: job.id, metadata: metadata)
+    }
+}
+
+private struct EncodingEditor: View {
+    @EnvironmentObject private var coordinator: ConversionCoordinator
+    var job: ConversionJob
+    @State private var settings: EncodingSettings = .default
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Picker("编码", selection: $settings.codec) {
+                ForEach(AudioCodec.allCases) { codec in
+                    Text(codec.label).tag(codec)
+                }
+            }
+            .frame(width: 180)
+
+            Picker("码率", selection: $settings.bitrateKbps) {
+                ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
+                    Text("\(bitrate) kbps").tag(bitrate)
+                }
+            }
+            .frame(width: 180)
+
+            Button("保存编码设置") {
+                coordinator.updateEncodingSettings(jobID: job.id, settings: settings)
+            }
+            .disabled(!job.isEditable)
+
+            if !job.isEditable {
+                Label("已锁定", systemImage: "lock")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .disabled(!job.isEditable)
+        .onAppear {
+            settings = job.encodingSettings
+        }
+        .onChange(of: job.id) {
+            settings = job.encodingSettings
+        }
+    }
+}
+
+private struct ChapterEditor: View {
+    @EnvironmentObject private var coordinator: ConversionCoordinator
+    var job: ConversionJob
+    @State private var chapters: [Chapter] = []
+    @State private var showingLocalPicker = false
+    @State private var showingWebDAVPicker = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                if job.isEditable {
+                    Button {
+                        addLocalTracks()
+                    } label: {
+                        Label("添加本地音轨", systemImage: "plus")
+                    }
+                    .disabled(job.input.kind != .local)
+
+                    Button {
+                        showingWebDAVPicker = true
+                    } label: {
+                        Label("添加 WebDAV 音轨", systemImage: "network")
+                    }
+                    .disabled(job.input.kind != .webDAV)
+
+                    Button("保存章节") {
+                        coordinator.updateChapters(jobID: job.id, chapters: chapters)
+                    }
+                } else {
+                    Label("任务已开始，章节和音轨已锁定。", systemImage: "lock")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if chapters.isEmpty {
+                ContentUnavailableView("暂无章节", systemImage: "list.number", description: Text("未开始任务可以添加音轨；开始时也会从输入目录自动扫描。"))
+                    .frame(minHeight: 120)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(chapters.indices, id: \.self) { index in
+                        ChapterRow(
+                            index: index,
+                            chapter: $chapters[index],
+                            isEditable: job.isEditable,
+                            moveUp: { moveChapter(from: index, to: index - 1) },
+                            moveDown: { moveChapter(from: index, to: index + 1) },
+                            delete: { deleteChapter(at: index) }
+                        )
+                    }
+                }
+            }
+        }
+        .onAppear {
+            chapters = job.chapters.sorted { $0.order < $1.order }
+        }
+        .onChange(of: job.id) {
+            chapters = job.chapters.sorted { $0.order < $1.order }
+        }
+        .sheet(isPresented: $showingWebDAVPicker) {
+            WebDAVTrackPicker(job: job) { items in
+                coordinator.addWebDAVChapters(jobID: job.id, items: items)
+                chapters = coordinator.jobs.first { $0.id == job.id }?.chapters.sorted { $0.order < $1.order } ?? chapters
+            }
+            .environmentObject(coordinator)
+        }
+    }
+
+    private func addLocalTracks() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.audio]
+        guard panel.runModal() == .OK else { return }
+        coordinator.addLocalChapters(jobID: job.id, urls: panel.urls)
+        chapters = coordinator.jobs.first { $0.id == job.id }?.chapters.sorted { $0.order < $1.order } ?? chapters
+    }
+
+    private func moveChapter(from source: Int, to destination: Int) {
+        guard chapters.indices.contains(source), chapters.indices.contains(destination) else { return }
+        let chapter = chapters.remove(at: source)
+        chapters.insert(chapter, at: destination)
+        normalizeOrders()
+    }
+
+    private func deleteChapter(at index: Int) {
+        guard chapters.indices.contains(index) else { return }
+        chapters.remove(at: index)
+        normalizeOrders()
+    }
+
+    private func normalizeOrders() {
+        chapters = chapters.enumerated().map { index, chapter in
+            var copy = chapter
+            copy.order = index
+            return copy
+        }
+    }
+}
+
+private struct ChapterRow: View {
+    var index: Int
+    @Binding var chapter: Chapter
+    var isEditable: Bool
+    var moveUp: () -> Void
+    var moveDown: () -> Void
+    var delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(index + 1)")
+                .foregroundStyle(.secondary)
+                .frame(width: 28, alignment: .trailing)
+            TextField("章节名", text: $chapter.title)
+                .disabled(!isEditable)
+            Text(chapter.sourceURL.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 220, alignment: .leading)
+            Button(action: moveUp) {
+                Image(systemName: "arrow.up")
+            }
+            .disabled(!isEditable || index == 0)
+            Button(action: moveDown) {
+                Image(systemName: "arrow.down")
+            }
+            .disabled(!isEditable)
+            Button(role: .destructive, action: delete) {
+                Image(systemName: "trash")
+            }
+            .disabled(!isEditable)
+        }
+    }
+}
+
+private struct WebDAVTrackPicker: View {
+    @EnvironmentObject private var coordinator: ConversionCoordinator
+    @Environment(\.dismiss) private var dismiss
+    var job: ConversionJob
+    var onSelect: ([StorageItem]) -> Void
+
+    @State private var items: [StorageItem] = []
+    @State private var selection = Set<URL>()
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("添加 WebDAV 音轨")
+                .font(.title2.weight(.semibold))
+            Text(job.input.displayPath)
+                .font(.callout.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+            }
+
+            List(items, selection: $selection) { item in
+                HStack {
+                    Image(systemName: "waveform")
+                    Text(item.name)
+                    Spacer()
+                    Text(item.size.formattedBytes)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .overlay {
+                if isLoading {
+                    ProgressView("加载音轨...")
+                }
+            }
+
+            HStack {
+                Button("取消") {
+                    dismiss()
+                }
+                Spacer()
+                Button("添加") {
+                    onSelect(items.filter { selection.contains($0.url) })
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selection.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 700, height: 520)
+        .task {
+            do {
+                items = try await coordinator.listWebDAVDirectory(credentialID: job.input.credentialID ?? UUID(), url: job.input.url)
+                    .filter { !$0.isDirectory && ["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"].contains($0.url.pathExtension.lowercased()) }
+                isLoading = false
+            } catch {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                isLoading = false
             }
         }
     }

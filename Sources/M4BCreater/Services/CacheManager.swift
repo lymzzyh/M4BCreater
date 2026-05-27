@@ -22,6 +22,11 @@ final class CacheManager {
         return directory
     }
 
+    func intermediateTrackURL(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> URL {
+        let fileName = "\(String(format: "%04d", chapter.order + 1))-\(chapter.id.uuidString).m4a"
+        return try intermediateDirectory(for: job, settings: settings).appending(path: fileName)
+    }
+
     func finalOutputURL(for job: ConversionJob, settings: AppSettings) throws -> URL {
         try workDirectory(for: job, settings: settings).appending(path: job.outputFileName)
     }
@@ -54,6 +59,10 @@ final class CacheManager {
 
     func cleanCompletedCache(for job: ConversionJob, settings: AppSettings) {
         guard settings.autoCleanCompletedCache, job.state == .completed else { return }
+        removeWorkDirectory(for: job, settings: settings)
+    }
+
+    func removeWorkDirectory(for job: ConversionJob, settings: AppSettings) {
         let directory = settings.cacheDirectory.appending(path: job.id.uuidString, directoryHint: .isDirectory)
         try? fileManager.removeItem(at: directory)
     }

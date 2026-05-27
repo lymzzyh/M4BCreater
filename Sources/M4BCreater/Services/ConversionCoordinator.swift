@@ -42,7 +42,7 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    func createLocalJob(inputURL: URL, outputURL: URL) {
+    func createLocalJob(inputURL: URL, outputURL: URL, encodingSettings: EncodingSettings = .default) {
         Task {
             let inspection = await metadataService.inspectLocalFolder(inputURL)
             let title = inspection.metadata.title.isEmpty ? inputURL.lastPathComponent : inspection.metadata.title
@@ -54,6 +54,7 @@ final class ConversionCoordinator: ObservableObject {
                 output: output,
                 metadata: inspection.metadata,
                 chapters: inspection.chapters,
+                encodingSettings: encodingSettings,
                 outputFileName: "\(Self.safeFileName(title)).m4b"
             )
             jobs.insert(job, at: 0)
@@ -69,7 +70,7 @@ final class ConversionCoordinator: ObservableObject {
         createJob(input: input, output: output)
     }
 
-    func createJob(input: StorageLocation, output: StorageLocation) {
+    func createJob(input: StorageLocation, output: StorageLocation, encodingSettings: EncodingSettings = .default) {
         let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
         let metadata = BookMetadata(title: title, author: "", narrator: "", album: title, description: "", coverURL: nil)
         let job = ConversionJob(
@@ -77,6 +78,7 @@ final class ConversionCoordinator: ObservableObject {
             input: input,
             output: output,
             metadata: metadata,
+            encodingSettings: encodingSettings,
             outputFileName: "\(Self.safeFileName(title)).m4b"
         )
         jobs.insert(job, at: 0)
@@ -93,6 +95,7 @@ final class ConversionCoordinator: ObservableObject {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         guard jobs[index].state != .running else { return }
         jobs[index].state = .running
+        jobs[index].hasStarted = true
         jobs[index].errorMessage = nil
         jobs[index].updatedAt = Date()
         persist()
@@ -130,8 +133,23 @@ final class ConversionCoordinator: ObservableObject {
         persist()
     }
 
+    func deleteJob(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let job = jobs[index]
+        if job.state == .running {
+            ffmpegRunner.terminate(jobID: jobID)
+        }
+        cacheManager.removeWorkDirectory(for: job, settings: settings)
+        jobs.remove(at: index)
+        if selectedJobID == jobID {
+            selectedJobID = jobs.first?.id
+        }
+        persist()
+    }
+
     func updateMetadata(for jobID: UUID, metadata: BookMetadata) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
         jobs[index].metadata = metadata
         jobs[index].title = metadata.title.isEmpty ? jobs[index].title : metadata.title
         jobs[index].outputFileName = "\(Self.safeFileName(jobs[index].title)).m4b"
@@ -141,6 +159,7 @@ final class ConversionCoordinator: ObservableObject {
 
     func scrapeSelectedJob() {
         guard let job = selectedJob else { return }
+        guard job.isEditable else { return }
         Task {
             do {
                 let candidates = try await metadataService.scrapeOpenLibrary(query: job.title)
@@ -154,6 +173,50 @@ final class ConversionCoordinator: ObservableObject {
                 setFailure(jobID: job.id, error: error)
             }
         }
+    }
+
+    func updateEncodingSettings(jobID: UUID, settings: EncodingSettings) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
+        jobs[index].encodingSettings = settings
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
+    func updateChapters(jobID: UUID, chapters: [Chapter]) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
+        jobs[index].chapters = normalizedChapters(chapters)
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
+    func addLocalChapters(jobID: UUID, urls: [URL]) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
+        let start = jobs[index].chapters.count
+        let additions = urls.enumerated()
+            .filter { Self.isAudioFile($0.element) }
+            .map { offset, url in
+                Chapter(title: url.deletingPathExtension().lastPathComponent, sourceURL: url, duration: 0, order: start + offset)
+            }
+        jobs[index].chapters = normalizedChapters(jobs[index].chapters + additions)
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
+    func addWebDAVChapters(jobID: UUID, items: [StorageItem]) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
+        let start = jobs[index].chapters.count
+        let additions = items.enumerated()
+            .filter { !$0.element.isDirectory && Self.isAudioFile($0.element.url) }
+            .map { offset, item in
+                Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: start + offset)
+            }
+        jobs[index].chapters = normalizedChapters(jobs[index].chapters + additions)
+        jobs[index].updatedAt = Date()
+        persist()
     }
 
     @discardableResult
@@ -196,21 +259,23 @@ final class ConversionCoordinator: ObservableObject {
         do {
             guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             var job = jobs[index]
-            update(jobID: jobID, stage: .preparingSources, total: 0.08, currentItem: "准备源文件")
-            let sources = try await prepareSources(for: job)
+            update(jobID: jobID, stage: .buildingChapters, total: 0.05, currentItem: "生成章节清单")
+            let chapters = try await buildTrackPlan(for: job)
 
-            guard !sources.isEmpty else {
+            guard !chapters.isEmpty else {
                 throw ConversionError.noAudioFiles
             }
+            updateChaptersForRun(jobID: jobID, chapters: chapters)
 
-            update(jobID: jobID, stage: .buildingChapters, total: 0.25, currentItem: "生成章节清单")
             if let refreshed = jobs.first(where: { $0.id == jobID }) {
                 job = refreshed
             }
+            update(jobID: jobID, stage: .transcoding, total: 0.08, currentItem: "准备转码")
+            let intermediateTracks = try await transcodePipeline(for: job)
 
-            update(jobID: jobID, stage: .packaging, total: 0.35, currentItem: "封装 M4B")
+            update(jobID: jobID, stage: .packaging, total: 0.85, currentItem: "封装 M4B")
             let localOutput = try cacheManager.finalOutputURL(for: job, settings: settings)
-            try await ffmpegRunner.packageM4B(jobID: jobID, sources: sources, metadata: job.metadata, outputURL: localOutput) { [weak self] progress in
+            try await ffmpegRunner.packageM4B(jobID: jobID, intermediateTracks: intermediateTracks, chapters: job.chapters, metadata: job.metadata, encodingSettings: job.encodingSettings, outputURL: localOutput) { [weak self] progress in
                 Task { @MainActor in
                     self?.applyFFmpegProgress(jobID: jobID, progress: progress)
                 }
@@ -233,40 +298,80 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    private func prepareSources(for job: ConversionJob) async throws -> [URL] {
+    private func buildTrackPlan(for job: ConversionJob) async throws -> [Chapter] {
+        if !job.chapters.isEmpty {
+            return normalizedChapters(job.chapters)
+        }
         switch job.input.kind {
         case .local:
-            if !job.chapters.isEmpty {
-                return job.chapters.map(\.sourceURL)
-            }
             let items = try await localProvider.list(job.input)
-            return items.filter { Self.isAudioFile($0.url) }.map(\.url)
+            return normalizedChapters(items.filter { Self.isAudioFile($0.url) }.enumerated().map { index, item in
+                Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
+            })
         case .webDAV:
             let items = try await webDAVProvider.list(job.input).filter { !$0.isDirectory && Self.isAudioFile($0.url) }
             let totalBytes = items.reduce(Int64(0)) { $0 + $1.size }
             try cacheManager.ensureCapacity(settings: settings, additionalBytes: totalBytes)
-            var localSources: [URL] = []
-            for (position, item) in items.enumerated() {
-                guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-                let localURL = try cacheManager.localURLForCachedRemote(item.url, job: job, settings: settings)
-                if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
-                    registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
-                    localSources.append(localURL)
-                    continue
-                }
-                registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
-                try await webDAVProvider.download(from: item.url, to: localURL, credentialID: job.input.credentialID) { [weak self] fileProgress in
-                    Task { @MainActor in
-                        let base = Double(position) / Double(max(items.count, 1))
-                        let total = 0.08 + (base + fileProgress / Double(max(items.count, 1))) * 0.22
-                        self?.update(jobID: job.id, stage: .preparingSources, total: total, currentItem: item.name)
-                    }
-                }
-                registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
-                localSources.append(localURL)
-            }
-            return localSources
+            return normalizedChapters(items.enumerated().map { index, item in
+                Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
+            })
         }
+    }
+
+    private func transcodePipeline(for job: ConversionJob) async throws -> [URL] {
+        let chapters = normalizedChapters(job.chapters)
+        var outputs: [URL] = []
+        var prefetchTask: Task<URL, Error>?
+
+        for index in chapters.indices {
+            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
+            let chapter = chapters[index]
+            let localSource: URL
+            if job.input.kind == .webDAV {
+                if prefetchTask == nil {
+                    prefetchTask = Task { try await downloadChapter(chapter, job: job, position: index, totalCount: chapters.count) }
+                }
+                localSource = try await prefetchTask!.value
+                let nextIndex = chapters.index(after: index)
+                prefetchTask = chapters.indices.contains(nextIndex)
+                    ? Task { try await downloadChapter(chapters[nextIndex], job: job, position: nextIndex, totalCount: chapters.count) }
+                    : nil
+            } else {
+                localSource = chapter.sourceURL
+            }
+
+            let outputURL = try cacheManager.intermediateTrackURL(for: job, chapter: chapter, settings: settings)
+            if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
+                outputs.append(outputURL)
+                continue
+            }
+            update(jobID: job.id, stage: .transcoding, total: progressBase(index: index, count: chapters.count), currentItem: chapter.title)
+            let encoded = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
+                Task { @MainActor in
+                    self?.applyTrackProgress(jobID: job.id, chapter: chapter, index: index, count: chapters.count, progress: progress)
+                }
+            }
+            outputs.append(encoded)
+        }
+        return outputs
+    }
+
+    private func downloadChapter(_ chapter: Chapter, job: ConversionJob, position: Int, totalCount: Int) async throws -> URL {
+        let item = StorageItem(url: chapter.sourceURL, name: chapter.title, isDirectory: false, size: 0, modifiedAt: nil)
+        let localURL = try cacheManager.localURLForCachedRemote(chapter.sourceURL, job: job, settings: settings)
+        if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
+            registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
+            return localURL
+        }
+        registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
+        try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID) { [weak self] fileProgress in
+            Task { @MainActor in
+                let total = 0.08 + ((Double(position) + fileProgress) / Double(max(totalCount, 1))) * 0.20
+                self?.update(jobID: job.id, stage: .preparingSources, total: total, currentItem: chapter.title)
+            }
+        }
+        registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
+        return localURL
     }
 
     private func writeOutput(localOutput: URL, job: ConversionJob) async throws {
@@ -308,6 +413,18 @@ final class ConversionCoordinator: ObservableObject {
         persist()
     }
 
+    private func applyTrackProgress(jobID: UUID, chapter: Chapter, index: Int, count: Int, progress: FFmpegProgress) {
+        guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[jobIndex].progress.total = max(jobs[jobIndex].progress.total, progressBase(index: index, count: count))
+        jobs[jobIndex].progress.currentFile = progress.currentFile
+        jobs[jobIndex].progress.speed = progress.speed
+        jobs[jobIndex].progress.eta = progress.eta
+        jobs[jobIndex].progress.currentItem = chapter.title
+        jobs[jobIndex].progress.logTail = progress.logLine
+        jobs[jobIndex].updatedAt = Date()
+        persist()
+    }
+
     private func registerCacheEntry(jobID: UUID, item: StorageItem, localURL: URL, state: CacheEntryState) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let entry = CacheEntry(remoteURL: item.url, localURL: localURL, byteSize: item.size, modifiedAt: item.modifiedAt, state: state, checksum: nil)
@@ -332,12 +449,31 @@ final class ConversionCoordinator: ObservableObject {
         jobs.first { $0.id == jobID }?.state
     }
 
+    private func updateChaptersForRun(jobID: UUID, chapters: [Chapter]) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].chapters = normalizedChapters(chapters)
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
+    private func normalizedChapters(_ chapters: [Chapter]) -> [Chapter] {
+        chapters.enumerated().map { index, chapter in
+            var copy = chapter
+            copy.order = index
+            return copy
+        }
+    }
+
     private func persist() {
         store.save(PersistedState(jobs: jobs, settings: settings, webDAVCredentials: webDAVCredentials))
     }
 
     private static func isAudioFile(_ url: URL) -> Bool {
         ["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"].contains(url.pathExtension.lowercased())
+    }
+
+    private func progressBase(index: Int, count: Int) -> Double {
+        0.28 + (Double(index) / Double(max(count, 1))) * 0.55
     }
 
     private static func safeFileName(_ value: String) -> String {
