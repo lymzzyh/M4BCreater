@@ -448,32 +448,36 @@ private struct ChapterEditor: View {
                 ContentUnavailableView("暂无章节", systemImage: "list.number", description: Text("未开始任务可以添加音轨；开始时也会从输入目录自动扫描。"))
                     .frame(minHeight: 120)
             } else {
-                LazyVStack(spacing: 6) {
-                    ForEach($chapters) { $chapter in
-                        if let index = chapters.firstIndex(where: { $0.id == chapter.id }) {
-                            ChapterRow(
-                                index: index,
-                                chapter: $chapter,
-                                isEditable: job.isEditable,
-                                moveUp: { moveChapter(from: index, to: index - 1) },
-                                moveDown: { moveChapter(from: index, to: index + 1) },
-                                delete: { deleteChapter(at: index) }
-                            )
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.secondary.opacity(0.08))
-                            )
-                            .draggable(job.isEditable ? chapter.id.uuidString : "")
-                            .dropDestination(for: String.self) { values, _ in
-                                guard job.isEditable, let value = values.first, let id = UUID(uuidString: value) else { return false }
-                                moveChapter(sourceID: id, destinationID: chapter.id)
-                                return true
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach($chapters) { $chapter in
+                            if let index = chapters.firstIndex(where: { $0.id == chapter.id }) {
+                                ChapterRow(
+                                    index: index,
+                                    chapter: $chapter,
+                                    isEditable: job.isEditable,
+                                    moveUp: { moveChapter(from: index, to: index - 1) },
+                                    moveDown: { moveChapter(from: index, to: index + 1) },
+                                    delete: { deleteChapter(at: index) }
+                                )
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color.secondary.opacity(0.08))
+                                )
+                                .draggable(job.isEditable ? chapter.id.uuidString : "")
+                                .dropDestination(for: String.self) { values, _ in
+                                    guard job.isEditable, let value = values.first, let id = UUID(uuidString: value) else { return false }
+                                    moveChapter(sourceID: id, destinationID: chapter.id)
+                                    return true
+                                }
                             }
                         }
                     }
+                    .padding(.trailing, 4)
                 }
+                .frame(maxHeight: 420)
             }
         }
         .onAppear {
