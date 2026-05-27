@@ -171,6 +171,10 @@ final class FFmpegRunner {
         kill(process.processIdentifier, SIGCONT)
     }
 
+    func hasActiveProcess(jobID: UUID) -> Bool {
+        processByJobID[jobID]?.isRunning == true
+    }
+
     func terminate(jobID: UUID) {
         processByJobID[jobID]?.terminate()
     }

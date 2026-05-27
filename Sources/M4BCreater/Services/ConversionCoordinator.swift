@@ -26,6 +26,7 @@ final class ConversionCoordinator: ObservableObject {
         for credential in state.webDAVCredentials {
             credentialStore.upsert(credential, password: nil)
         }
+        normalizeRecoveredJobs()
         ffmpegStatus = ffmpegRunner.validateBundledBinaries()
         selectedJobID = jobs.first?.id
     }
@@ -122,11 +123,16 @@ final class ConversionCoordinator: ObservableObject {
     func resume(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         if jobs[index].stage == .transcoding || jobs[index].stage == .packaging {
-            ffmpegRunner.resume(jobID: jobID)
-            jobs[index].state = .running
-            jobs[index].updatedAt = Date()
-            appendLog(jobID: jobID, "任务继续")
-            persist()
+            if ffmpegRunner.hasActiveProcess(jobID: jobID) {
+                ffmpegRunner.resume(jobID: jobID)
+                jobs[index].state = .running
+                jobs[index].updatedAt = Date()
+                appendLog(jobID: jobID, "任务继续")
+                persist()
+            } else {
+                appendLog(jobID: jobID, "未发现可继续的 FFmpeg 进程，重新进入可恢复流程")
+                start(jobID: jobID)
+            }
         } else {
             start(jobID: jobID)
         }
@@ -367,10 +373,14 @@ final class ConversionCoordinator: ObservableObject {
             }
 
             let outputURL = try cacheManager.intermediateTrackURL(for: job, chapter: chapter, settings: settings)
-            if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
+            if try cacheManager.intermediateTrackIsComplete(for: job, chapter: chapter, settings: settings) {
                 appendLog(jobID: job.id, "跳过已完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
                 outputs.append(outputURL)
                 continue
+            }
+            if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
+                appendLog(jobID: job.id, "清理未完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
+                try cacheManager.removeIntermediateTrack(for: job, chapter: chapter, settings: settings)
             }
             update(jobID: job.id, stage: .transcoding, total: progressBase(index: index, count: chapters.count), currentItem: chapter.title)
             appendLog(jobID: job.id, "转码音轨 \(index + 1)/\(chapters.count)：\(chapter.title)，编码器 \(ffmpegRunner.audioEncoderName(for: job.encodingSettings))")
@@ -379,6 +389,7 @@ final class ConversionCoordinator: ObservableObject {
                     self?.applyTrackProgress(jobID: job.id, chapter: chapter, index: index, count: chapters.count, progress: progress)
                 }
             }
+            try cacheManager.markIntermediateTrackComplete(for: job, chapter: chapter, settings: settings)
             outputs.append(encoded)
             appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapter.title)")
         }
@@ -585,6 +596,20 @@ final class ConversionCoordinator: ObservableObject {
 
     private func persist() {
         store.save(PersistedState(jobs: jobs, settings: settings, webDAVCredentials: webDAVCredentials))
+    }
+
+    private func normalizeRecoveredJobs() {
+        var changed = false
+        for index in jobs.indices where jobs[index].state == .running {
+            jobs[index].state = .paused
+            jobs[index].updatedAt = Date()
+            let timestamp = DateFormatter.logTime.string(from: Date())
+            jobs[index].progress.eventLog.append("[\(timestamp)] 应用重新启动，运行中任务已转为可继续状态")
+            changed = true
+        }
+        if changed {
+            persist()
+        }
     }
 
     private static func isAudioFile(_ url: URL) -> Bool {

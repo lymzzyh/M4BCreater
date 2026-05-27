@@ -27,6 +27,29 @@ final class CacheManager {
         return try intermediateDirectory(for: job, settings: settings).appending(path: fileName)
     }
 
+    func intermediateDoneURL(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> URL {
+        try intermediateTrackURL(for: job, chapter: chapter, settings: settings).appendingPathExtension("done")
+    }
+
+    func intermediateTrackIsComplete(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> Bool {
+        let outputURL = try intermediateTrackURL(for: job, chapter: chapter, settings: settings)
+        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
+        return fileManager.fileExists(atPath: outputURL.path(percentEncoded: false))
+            && fileManager.fileExists(atPath: doneURL.path(percentEncoded: false))
+    }
+
+    func markIntermediateTrackComplete(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws {
+        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
+        try Data(Date().ISO8601Format().utf8).write(to: doneURL, options: [.atomic])
+    }
+
+    func removeIntermediateTrack(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws {
+        let outputURL = try intermediateTrackURL(for: job, chapter: chapter, settings: settings)
+        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
+        try? fileManager.removeItem(at: outputURL)
+        try? fileManager.removeItem(at: doneURL)
+    }
+
     func finalOutputURL(for job: ConversionJob, settings: AppSettings) throws -> URL {
         try workDirectory(for: job, settings: settings).appending(path: job.outputFileName)
     }
