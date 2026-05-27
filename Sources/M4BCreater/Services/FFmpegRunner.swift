@@ -15,11 +15,11 @@ final class FFmpegRunner {
     private var processByJobID: [UUID: Process] = [:]
 
     func bundledFFmpegURL() -> URL? {
-        Bundle.module.url(forResource: "ffmpeg", withExtension: nil, subdirectory: "FFmpeg")
+        bundledExecutableURL(named: "ffmpeg")
     }
 
     func bundledFFprobeURL() -> URL? {
-        Bundle.module.url(forResource: "ffprobe", withExtension: nil, subdirectory: "FFmpeg")
+        bundledExecutableURL(named: "ffprobe")
     }
 
     func validateBundledBinaries() -> String {
@@ -127,6 +127,20 @@ final class FFmpegRunner {
         let speed = line.components(separatedBy: "speed=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
         let time = line.components(separatedBy: "time=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
         return FFmpegProgress(total: 0, currentFile: 0, speed: speed, eta: time, currentItem: "FFmpeg", logLine: line)
+    }
+
+    private func bundledExecutableURL(named name: String) -> URL? {
+        let candidates = [
+            Bundle.module.url(forResource: name, withExtension: nil),
+            Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "FFmpeg"),
+            Bundle.main.url(forResource: name, withExtension: nil),
+            Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "FFmpeg"),
+            Bundle.main.resourceURL?.appending(path: name),
+            Bundle.main.resourceURL?.appending(path: "FFmpeg/\(name)")
+        ]
+        return candidates.compactMap(\.self).first {
+            FileManager.default.isExecutableFile(atPath: $0.path(percentEncoded: false))
+        }
     }
 }
 

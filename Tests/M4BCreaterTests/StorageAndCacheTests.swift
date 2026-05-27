@@ -5,6 +5,18 @@ import Testing
 @MainActor
 struct StorageAndCacheTests {
     @Test
+    func bundledFFmpegExecutablesAreDiscoverable() {
+        let runner = FFmpegRunner()
+        let ffmpeg = runner.bundledFFmpegURL()
+        let ffprobe = runner.bundledFFprobeURL()
+
+        #expect(ffmpeg != nil)
+        #expect(ffprobe != nil)
+        #expect(ffmpeg.map { FileManager.default.isExecutableFile(atPath: $0.path(percentEncoded: false)) } == true)
+        #expect(ffprobe.map { FileManager.default.isExecutableFile(atPath: $0.path(percentEncoded: false)) } == true)
+    }
+
+    @Test
     func localProviderCopiesFilesForDownloadAndUpload() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let input = root.appending(path: "input", directoryHint: .isDirectory)
