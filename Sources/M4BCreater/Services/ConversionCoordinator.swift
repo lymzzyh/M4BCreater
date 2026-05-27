@@ -367,10 +367,10 @@ final class ConversionCoordinator: ObservableObject {
             return localURL
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
-        try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID) { [weak self] fileProgress in
+        try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID) { [weak self] transfer in
             Task { @MainActor in
-                let total = 0.08 + ((Double(position) + fileProgress) / Double(max(totalCount, 1))) * 0.20
-                self?.update(jobID: job.id, stage: .preparingSources, total: total, currentItem: chapter.title)
+                let total = 0.08 + ((Double(position) + transfer.fraction) / Double(max(totalCount, 1))) * 0.20
+                self?.updateDownloadProgress(jobID: job.id, chapter: chapter, total: total, transfer: transfer)
             }
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
@@ -425,6 +425,21 @@ final class ConversionCoordinator: ObservableObject {
         jobs[jobIndex].progress.currentItem = chapter.title
         jobs[jobIndex].progress.logTail = progress.logLine
         jobs[jobIndex].updatedAt = Date()
+        persist()
+    }
+
+    private func updateDownloadProgress(jobID: UUID, chapter: Chapter, total: Double, transfer: TransferProgress) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let transferred = transfer.bytesTransferred.formattedBytes
+        let expected = transfer.totalBytes?.formattedBytes ?? "未知大小"
+        jobs[index].stage = .preparingSources
+        jobs[index].progress.total = min(max(total, 0), 1)
+        jobs[index].progress.currentFile = transfer.fraction
+        jobs[index].progress.currentItem = chapter.title
+        jobs[index].progress.downloadProgress = transfer.fraction
+        jobs[index].progress.downloadSpeed = transfer.speedLabel
+        jobs[index].progress.diagnostic = "WebDAV 下载 \(chapter.sourceURL.lastPathComponent)：\(transferred) / \(expected)"
+        jobs[index].updatedAt = Date()
         persist()
     }
 

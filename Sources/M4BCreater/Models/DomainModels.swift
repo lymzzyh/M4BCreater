@@ -159,6 +159,9 @@ struct ConversionProgress: Codable, Hashable {
     var eta: String = "-"
     var currentItem: String = "-"
     var logTail: String = ""
+    var downloadSpeed: String = "-"
+    var downloadProgress: Double = 0
+    var diagnostic: String = ""
 }
 
 struct ConversionJob: Codable, Identifiable, Hashable {

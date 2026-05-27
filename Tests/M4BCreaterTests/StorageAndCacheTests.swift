@@ -105,7 +105,7 @@ struct StorageAndCacheTests {
 
         let provider = LocalStorageProvider()
         let cached = cache.appending(path: "chapter.mp3")
-        try await provider.download(from: source, to: cached) { _ in }
+        try await provider.download(from: source, to: cached) { (_: Double) in }
         #expect(FileManager.default.fileExists(atPath: cached.path(percentEncoded: false)))
 
         let final = output.appending(path: "book.m4b")

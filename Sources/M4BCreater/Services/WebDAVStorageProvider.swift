@@ -79,23 +79,57 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
     }
 
     func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try await download(from: remoteURL, to: localURL, credentialID: nil) { transfer in
+            progress(transfer.fraction)
+        }
+    }
+
+    func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (TransferProgress) -> Void) async throws {
         try await download(from: remoteURL, to: localURL, credentialID: nil, progress: progress)
     }
 
     func download(from remoteURL: URL, to localURL: URL, credentialID: UUID?, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try await download(from: remoteURL, to: localURL, credentialID: credentialID) { transfer in
+            progress(transfer.fraction)
+        }
+    }
+
+    func download(from remoteURL: URL, to localURL: URL, credentialID: UUID?, progress: @escaping @Sendable (TransferProgress) -> Void) async throws {
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         var request = URLRequest(url: remoteURL)
         request.httpMethod = "GET"
         applyAuthorization(to: &request, credentialID: credentialID)
-        let (tempURL, response) = try await session.download(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw StorageError.invalidResponse
         }
+        let expectedBytes = Int64(http.value(forHTTPHeaderField: "Content-Length") ?? "")
         if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
             try FileManager.default.removeItem(at: localURL)
         }
-        try FileManager.default.moveItem(at: tempURL, to: localURL)
-        progress(1)
+        FileManager.default.createFile(atPath: localURL.path(percentEncoded: false), contents: nil)
+        let handle = try FileHandle(forWritingTo: localURL)
+        defer { try? handle.close() }
+
+        var transferred: Int64 = 0
+        let start = Date()
+        var buffer = Data()
+        buffer.reserveCapacity(64 * 1024)
+
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= 64 * 1024 {
+                try handle.write(contentsOf: buffer)
+                transferred += Int64(buffer.count)
+                buffer.removeAll(keepingCapacity: true)
+                progress(Self.transferProgress(transferred: transferred, total: expectedBytes, start: start))
+            }
+        }
+        if !buffer.isEmpty {
+            try handle.write(contentsOf: buffer)
+            transferred += Int64(buffer.count)
+        }
+        progress(Self.transferProgress(transferred: transferred, total: expectedBytes, start: start, forceComplete: true))
     }
 
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -129,6 +163,21 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
         let password = credentialStore.password(for: credential.passwordReference) ?? ""
         let token = Data("\(credential.username):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+    }
+
+    private static func transferProgress(transferred: Int64, total: Int64?, start: Date, forceComplete: Bool = false) -> TransferProgress {
+        let elapsed = max(Date().timeIntervalSince(start), 0.001)
+        let fraction = if let total, total > 0 {
+            min(max(Double(transferred) / Double(total), 0.0), 1.0)
+        } else {
+            forceComplete ? 1.0 : 0.0
+        }
+        return TransferProgress(
+            fraction: forceComplete ? 1 : fraction,
+            bytesTransferred: transferred,
+            totalBytes: total,
+            bytesPerSecond: Double(transferred) / elapsed
+        )
     }
 }
 

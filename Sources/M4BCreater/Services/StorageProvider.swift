@@ -16,6 +16,18 @@ struct StorageStat: Hashable {
     var modifiedAt: Date?
 }
 
+struct TransferProgress: Sendable, Hashable {
+    var fraction: Double
+    var bytesTransferred: Int64
+    var totalBytes: Int64?
+    var bytesPerSecond: Double
+
+    var speedLabel: String {
+        guard bytesPerSecond > 0 else { return "-" }
+        return "\(ByteCountFormatter.string(fromByteCount: Int64(bytesPerSecond), countStyle: .file))/s"
+    }
+}
+
 @MainActor
 protocol StorageProvider {
     var kind: StorageKind { get }
@@ -25,6 +37,7 @@ protocol StorageProvider {
     func exists(_ url: URL) async -> Bool
     func makeDirectory(_ url: URL) async throws
     func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws
+    func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (TransferProgress) -> Void) async throws
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws
     func displayPath(for url: URL) -> String
 }
@@ -91,12 +104,19 @@ final class LocalStorageProvider: StorageProvider {
     }
 
     func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try await download(from: remoteURL, to: localURL) { transfer in
+            progress(transfer.fraction)
+        }
+    }
+
+    func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (TransferProgress) -> Void) async throws {
         try fileManager.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: localURL.path(percentEncoded: false)) {
             try fileManager.removeItem(at: localURL)
         }
         try fileManager.copyItem(at: remoteURL, to: localURL)
-        progress(1)
+        let size = (try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        progress(TransferProgress(fraction: 1, bytesTransferred: size, totalBytes: size, bytesPerSecond: 0))
     }
 
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {

@@ -92,8 +92,17 @@ struct JobDetailView: View {
                 HStack(spacing: 24) {
                     MetricView(title: "阶段", value: job.stage.label)
                     MetricView(title: "速度", value: job.progress.speed)
+                    if job.input.kind == .webDAV {
+                        MetricView(title: "下载速度", value: job.progress.downloadSpeed)
+                    }
                     MetricView(title: "时间", value: job.progress.eta)
                     MetricView(title: "文件", value: job.progress.currentFile.formatted(.percent.precision(.fractionLength(0))))
+                }
+                if job.input.kind == .webDAV, !job.progress.diagnostic.isEmpty {
+                    Text(job.progress.diagnostic)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
             }
         }
