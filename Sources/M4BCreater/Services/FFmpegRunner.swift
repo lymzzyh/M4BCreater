@@ -74,6 +74,7 @@ final class FFmpegRunner {
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let arguments = [
             "-hide_banner",
+            "-nostdin",
             "-nostats",
             "-progress", "pipe:2",
             "-y",
@@ -111,6 +112,7 @@ final class FFmpegRunner {
 
         var arguments = [
             "-hide_banner",
+            "-nostdin",
             "-nostats",
             "-progress", "pipe:2",
             "-y",
@@ -147,6 +149,7 @@ final class FFmpegRunner {
     func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
         [
             "-hide_banner",
+            "-nostdin",
             "-nostats",
             "-progress", "pipe:2",
             "-y",
@@ -189,6 +192,7 @@ final class FFmpegRunner {
 
         let reader = Task {
             var current = FFmpegProgress(total: 0, currentFile: 0, speed: "-", eta: "-", currentItem: "FFmpeg", logLine: "FFmpeg 已启动")
+            progress(current)
             for try await line in pipe.fileHandleForReading.bytes.lines {
                 current = Self.parse(line: line, duration: progressDuration, current: current)
                 progress(current)
@@ -196,19 +200,31 @@ final class FFmpegRunner {
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let completion = ProcessCompletion(continuation: continuation)
             process.terminationHandler = { completed in
                 reader.cancel()
-                if completed.terminationStatus == 0 {
-                    continuation.resume()
+                try? pipe.fileHandleForReading.close()
+                let status = completed.terminationStatus
+                progress(FFmpegProgress(
+                    total: 0,
+                    currentFile: status == 0 ? 1 : 0,
+                    speed: "-",
+                    eta: "-",
+                    currentItem: "FFmpeg",
+                    logLine: "FFmpeg 退出，状态码 \(status)"
+                ))
+                if status == 0 {
+                    completion.resume(.success(()))
                 } else {
-                    continuation.resume(throwing: FFmpegError.failed(status: completed.terminationStatus))
+                    completion.resume(.failure(FFmpegError.failed(status: status)))
                 }
             }
             do {
                 try process.run()
             } catch {
                 reader.cancel()
-                continuation.resume(throwing: error)
+                try? pipe.fileHandleForReading.close()
+                completion.resume(.failure(error))
             }
         }
         processByJobID[jobID] = nil
@@ -392,6 +408,38 @@ final class FFmpegRunner {
         return candidates.compactMap(\.self).first {
             FileManager.default.isExecutableFile(atPath: $0.path(percentEncoded: false))
         }
+    }
+}
+
+private final class ProcessCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    init(continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ result: Result<Void, Error>) {
+        let continuation = lock.withLock {
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        guard let continuation else { return }
+        switch result {
+        case .success:
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 
