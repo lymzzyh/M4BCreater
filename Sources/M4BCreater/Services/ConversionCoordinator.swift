@@ -102,6 +102,7 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].hasStarted = true
         jobs[index].errorMessage = nil
         jobs[index].updatedAt = Date()
+        appendLog(jobID: jobID, "任务开始：\(jobs[index].title)")
         persist()
 
         Task {
@@ -114,6 +115,7 @@ final class ConversionCoordinator: ObservableObject {
         ffmpegRunner.pause(jobID: jobID)
         jobs[index].state = .paused
         jobs[index].updatedAt = Date()
+        appendLog(jobID: jobID, "任务暂停")
         persist()
     }
 
@@ -123,6 +125,7 @@ final class ConversionCoordinator: ObservableObject {
             ffmpegRunner.resume(jobID: jobID)
             jobs[index].state = .running
             jobs[index].updatedAt = Date()
+            appendLog(jobID: jobID, "任务继续")
             persist()
         } else {
             start(jobID: jobID)
@@ -134,6 +137,7 @@ final class ConversionCoordinator: ObservableObject {
         ffmpegRunner.terminate(jobID: jobID)
         jobs[index].state = .cancelled
         jobs[index].updatedAt = Date()
+        appendLog(jobID: jobID, "任务取消")
         persist()
     }
 
@@ -265,6 +269,7 @@ final class ConversionCoordinator: ObservableObject {
             var job = jobs[index]
             update(jobID: jobID, stage: .buildingChapters, total: 0.05, currentItem: "校验章节清单")
             let chapters = normalizedChapters(job.chapters)
+            appendLog(jobID: jobID, "校验章节：\(chapters.count) 条音轨")
 
             guard !chapters.isEmpty else {
                 throw ConversionError.noAudioFiles
@@ -274,9 +279,11 @@ final class ConversionCoordinator: ObservableObject {
                 job = refreshed
             }
             update(jobID: jobID, stage: .transcoding, total: 0.08, currentItem: "准备转码")
+            appendLog(jobID: jobID, "开始转码流水线")
             let intermediateTracks = try await transcodePipeline(for: job)
 
             update(jobID: jobID, stage: .packaging, total: 0.85, currentItem: "封装 M4B")
+            appendLog(jobID: jobID, "开始封装 M4B")
             let localOutput = try cacheManager.finalOutputURL(for: job, settings: settings)
             try await ffmpegRunner.packageM4B(jobID: jobID, intermediateTracks: intermediateTracks, chapters: job.chapters, metadata: job.metadata, encodingSettings: job.encodingSettings, outputURL: localOutput) { [weak self] progress in
                 Task { @MainActor in
@@ -285,6 +292,7 @@ final class ConversionCoordinator: ObservableObject {
             }
 
             update(jobID: jobID, stage: .writingOutput, total: 0.92, currentItem: "写入输出目录")
+            appendLog(jobID: jobID, "写入输出：\(job.output.displayPath)")
             try await writeOutput(localOutput: localOutput, job: job)
 
             guard let completedIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
@@ -295,6 +303,7 @@ final class ConversionCoordinator: ObservableObject {
             jobs[completedIndex].progress.currentItem = "完成"
             jobs[completedIndex].updatedAt = Date()
             cacheManager.cleanCompletedCache(for: jobs[completedIndex], settings: settings)
+            appendLog(jobID: jobID, "任务完成：\(jobs[completedIndex].outputFileName)")
             persist()
         } catch {
             setFailure(jobID: jobID, error: error)
@@ -349,6 +358,7 @@ final class ConversionCoordinator: ObservableObject {
                 continue
             }
             update(jobID: job.id, stage: .transcoding, total: progressBase(index: index, count: chapters.count), currentItem: chapter.title)
+            appendLog(jobID: job.id, "转码音轨 \(index + 1)/\(chapters.count)：\(chapter.title)")
             let encoded = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
                 Task { @MainActor in
                     self?.applyTrackProgress(jobID: job.id, chapter: chapter, index: index, count: chapters.count, progress: progress)
@@ -367,6 +377,7 @@ final class ConversionCoordinator: ObservableObject {
             return localURL
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
+        appendLog(jobID: job.id, "开始 WebDAV 下载：\(chapter.sourceURL.lastPathComponent)")
         try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID) { [weak self] transfer in
             Task { @MainActor in
                 let total = 0.08 + ((Double(position) + transfer.fraction) / Double(max(totalCount, 1))) * 0.20
@@ -374,6 +385,7 @@ final class ConversionCoordinator: ObservableObject {
             }
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
+        appendLog(jobID: job.id, "WebDAV 下载完成：\(chapter.sourceURL.lastPathComponent)")
         return localURL
     }
 
@@ -412,6 +424,7 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.eta = progress.eta
         jobs[index].progress.currentItem = progress.currentItem
         jobs[index].progress.logTail = progress.logLine
+        appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
         jobs[index].updatedAt = Date()
         persist()
     }
@@ -424,6 +437,7 @@ final class ConversionCoordinator: ObservableObject {
         jobs[jobIndex].progress.eta = progress.eta
         jobs[jobIndex].progress.currentItem = chapter.title
         jobs[jobIndex].progress.logTail = progress.logLine
+        appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
         jobs[jobIndex].updatedAt = Date()
         persist()
     }
@@ -439,6 +453,7 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.downloadProgress = transfer.fraction
         jobs[index].progress.downloadSpeed = transfer.speedLabel
         jobs[index].progress.diagnostic = "WebDAV 下载 \(chapter.sourceURL.lastPathComponent)：\(transferred) / \(expected)"
+        appendLog(jobID: jobID, jobs[index].progress.diagnostic, persistImmediately: false)
         jobs[index].updatedAt = Date()
         persist()
     }
@@ -466,7 +481,23 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].state = .failed
         jobs[index].errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         jobs[index].updatedAt = Date()
+        appendLog(jobID: jobID, "任务失败：\(jobs[index].errorMessage ?? error.localizedDescription)", persistImmediately: false)
         persist()
+    }
+
+    private func appendLog(jobID: UUID, _ message: String, persistImmediately: Bool = true) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let timestamp = DateFormatter.logTime.string(from: Date())
+        jobs[index].progress.eventLog.append("[\(timestamp)] \(trimmed)")
+        if jobs[index].progress.eventLog.count > 200 {
+            jobs[index].progress.eventLog.removeFirst(jobs[index].progress.eventLog.count - 200)
+        }
+        if persistImmediately {
+            jobs[index].updatedAt = Date()
+            persist()
+        }
     }
 
     private func currentState(jobID: UUID) -> JobState? {
@@ -530,4 +561,12 @@ enum ConversionError: LocalizedError {
             "任务已暂停或取消。"
         }
     }
+}
+
+private extension DateFormatter {
+    static let logTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }

@@ -168,13 +168,26 @@ struct JobDetailView: View {
                     Text(error)
                         .foregroundStyle(.red)
                 }
-                Text(job.progress.logTail.isEmpty ? "暂无 FFmpeg 输出。" : job.progress.logTail)
+                Text(logText)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var logText: String {
+        if !job.progress.eventLog.isEmpty {
+            return job.progress.eventLog.suffix(80).joined(separator: "\n")
+        }
+        if !job.progress.diagnostic.isEmpty {
+            return job.progress.diagnostic
+        }
+        if !job.progress.logTail.isEmpty {
+            return job.progress.logTail
+        }
+        return "暂无日志。"
     }
 
     private var primaryActionTitle: String {
@@ -210,6 +223,10 @@ private struct MetadataEditor: View {
             }
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
                 GridRow {
+                    Text("封面")
+                    CoverPicker(metadata: $metadata, isEditable: job.isEditable)
+                }
+                GridRow {
                     Text("标题")
                     TextField("标题", text: $metadata.title)
                 }
@@ -224,6 +241,38 @@ private struct MetadataEditor: View {
                 GridRow {
                     Text("专辑")
                     TextField("专辑", text: $metadata.album)
+                }
+                GridRow {
+                    Text("系列")
+                    TextField("系列", text: $metadata.series)
+                }
+                GridRow {
+                    Text("分类")
+                    TextField("分类/类型", text: $metadata.genre)
+                }
+                GridRow {
+                    Text("出版社")
+                    TextField("出版社", text: $metadata.publisher)
+                }
+                GridRow {
+                    Text("出版日期")
+                    TextField("YYYY-MM-DD", text: $metadata.publishDate)
+                }
+                GridRow {
+                    Text("语言")
+                    TextField("zh-CN / en", text: $metadata.language)
+                }
+                GridRow {
+                    Text("ISBN")
+                    TextField("ISBN", text: $metadata.isbn)
+                }
+                GridRow {
+                    Text("ASIN")
+                    TextField("ASIN", text: $metadata.asin)
+                }
+                GridRow {
+                    Text("版权")
+                    TextField("版权", text: $metadata.copyright)
                 }
                 GridRow {
                     Text("简介")
@@ -246,6 +295,66 @@ private struct MetadataEditor: View {
         }
         .onChange(of: job.id) {
             metadata = job.metadata
+        }
+    }
+}
+
+private struct CoverPicker: View {
+    @Binding var metadata: BookMetadata
+    var isEditable: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            coverPreview
+            VStack(alignment: .leading, spacing: 8) {
+                Text(metadata.coverURL?.path(percentEncoded: false) ?? "未选择封面")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                HStack {
+                    Button {
+                        pickCover()
+                    } label: {
+                        Label("选择封面", systemImage: "photo")
+                    }
+                    Button {
+                        metadata.coverURL = nil
+                    } label: {
+                        Label("移除", systemImage: "xmark.circle")
+                    }
+                    .disabled(metadata.coverURL == nil)
+                }
+            }
+        }
+        .disabled(!isEditable)
+    }
+
+    @ViewBuilder
+    private var coverPreview: some View {
+        if let coverURL = metadata.coverURL, let image = NSImage(contentsOf: coverURL) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 72, height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+        } else {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.quaternary)
+                .frame(width: 72, height: 96)
+                .overlay(Image(systemName: "book.closed").foregroundStyle(.secondary))
+        }
+    }
+
+    private func pickCover() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        if panel.runModal() == .OK {
+            metadata.coverURL = panel.url
         }
     }
 }

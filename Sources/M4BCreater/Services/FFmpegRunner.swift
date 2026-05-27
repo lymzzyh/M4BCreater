@@ -117,6 +117,15 @@ final class FFmpegRunner {
             "-metadata", "title=\(metadata.title)",
             "-metadata", "artist=\(metadata.author)",
             "-metadata", "album=\(metadata.album.isEmpty ? metadata.title : metadata.album)",
+            "-metadata", "album_artist=\(metadata.author)",
+            "-metadata", "composer=\(metadata.narrator)",
+            "-metadata", "genre=\(metadata.genre)",
+            "-metadata", "publisher=\(metadata.publisher)",
+            "-metadata", "date=\(metadata.publishDate)",
+            "-metadata", "language=\(metadata.language)",
+            "-metadata", "copyright=\(metadata.copyright)",
+            "-metadata", "description=\(metadata.description)",
+            "-metadata", "comment=\(metadataComment(metadata))",
             outputURL.path(percentEncoded: false)
         ]
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progress: progress)
@@ -233,6 +242,12 @@ final class FFmpegRunner {
         lines.append("title=\(escapeMetadata(metadata.title))")
         lines.append("artist=\(escapeMetadata(metadata.author))")
         lines.append("album=\(escapeMetadata(metadata.album.isEmpty ? metadata.title : metadata.album))")
+        appendIfPresent("genre", metadata.genre, to: &lines)
+        appendIfPresent("publisher", metadata.publisher, to: &lines)
+        appendIfPresent("date", metadata.publishDate, to: &lines)
+        appendIfPresent("language", metadata.language, to: &lines)
+        appendIfPresent("copyright", metadata.copyright, to: &lines)
+        appendIfPresent("description", metadata.description, to: &lines)
 
         var startMS = 0
         let ordered = chapters.sorted { $0.order < $1.order }
@@ -256,6 +271,22 @@ final class FFmpegRunner {
             .replacingOccurrences(of: "=", with: "\\=")
             .replacingOccurrences(of: ";", with: "\\;")
             .replacingOccurrences(of: "#", with: "\\#")
+    }
+
+    private static func appendIfPresent(_ key: String, _ value: String, to lines: inout [String]) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lines.append("\(key)=\(escapeMetadata(trimmed))")
+    }
+
+    private func metadataComment(_ metadata: BookMetadata) -> String {
+        [
+            metadata.series.isEmpty ? nil : "Series: \(metadata.series)",
+            metadata.isbn.isEmpty ? nil : "ISBN: \(metadata.isbn)",
+            metadata.asin.isEmpty ? nil : "ASIN: \(metadata.asin)"
+        ]
+        .compactMap(\.self)
+        .joined(separator: "; ")
     }
 
     private func bundledExecutableURL(named name: String) -> URL? {

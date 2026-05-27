@@ -74,6 +74,14 @@ final class MetadataService {
             case "author", "作者": result.author = parts[1]
             case "narrator", "旁白", "播讲": result.narrator = parts[1]
             case "album", "专辑": result.album = parts[1]
+            case "series", "系列": result.series = parts[1]
+            case "genre", "分类", "类型": result.genre = parts[1]
+            case "publisher", "出版社": result.publisher = parts[1]
+            case "publishdate", "published", "出版日期": result.publishDate = parts[1]
+            case "language", "语言": result.language = parts[1]
+            case "copyright", "版权": result.copyright = parts[1]
+            case "isbn": result.isbn = parts[1]
+            case "asin": result.asin = parts[1]
             case "description", "简介": result.description = parts[1]
             default: break
             }

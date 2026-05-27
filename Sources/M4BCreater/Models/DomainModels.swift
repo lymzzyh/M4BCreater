@@ -84,6 +84,14 @@ struct BookMetadata: Codable, Hashable {
     var author: String
     var narrator: String
     var album: String
+    var series: String = ""
+    var genre: String = ""
+    var publisher: String = ""
+    var publishDate: String = ""
+    var language: String = ""
+    var copyright: String = ""
+    var isbn: String = ""
+    var asin: String = ""
     var description: String
     var coverURL: URL?
 
@@ -92,9 +100,84 @@ struct BookMetadata: Codable, Hashable {
         author: "",
         narrator: "",
         album: "",
+        series: "",
+        genre: "",
+        publisher: "",
+        publishDate: "",
+        language: "",
+        copyright: "",
+        isbn: "",
+        asin: "",
         description: "",
         coverURL: nil
     )
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case author
+        case narrator
+        case album
+        case series
+        case genre
+        case publisher
+        case publishDate
+        case language
+        case copyright
+        case isbn
+        case asin
+        case description
+        case coverURL
+    }
+
+    init(
+        title: String,
+        author: String,
+        narrator: String,
+        album: String,
+        series: String = "",
+        genre: String = "",
+        publisher: String = "",
+        publishDate: String = "",
+        language: String = "",
+        copyright: String = "",
+        isbn: String = "",
+        asin: String = "",
+        description: String,
+        coverURL: URL?
+    ) {
+        self.title = title
+        self.author = author
+        self.narrator = narrator
+        self.album = album
+        self.series = series
+        self.genre = genre
+        self.publisher = publisher
+        self.publishDate = publishDate
+        self.language = language
+        self.copyright = copyright
+        self.isbn = isbn
+        self.asin = asin
+        self.description = description
+        self.coverURL = coverURL
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
+        author = try container.decodeIfPresent(String.self, forKey: .author) ?? ""
+        narrator = try container.decodeIfPresent(String.self, forKey: .narrator) ?? ""
+        album = try container.decodeIfPresent(String.self, forKey: .album) ?? ""
+        series = try container.decodeIfPresent(String.self, forKey: .series) ?? ""
+        genre = try container.decodeIfPresent(String.self, forKey: .genre) ?? ""
+        publisher = try container.decodeIfPresent(String.self, forKey: .publisher) ?? ""
+        publishDate = try container.decodeIfPresent(String.self, forKey: .publishDate) ?? ""
+        language = try container.decodeIfPresent(String.self, forKey: .language) ?? ""
+        copyright = try container.decodeIfPresent(String.self, forKey: .copyright) ?? ""
+        isbn = try container.decodeIfPresent(String.self, forKey: .isbn) ?? ""
+        asin = try container.decodeIfPresent(String.self, forKey: .asin) ?? ""
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        coverURL = try container.decodeIfPresent(URL.self, forKey: .coverURL)
+    }
 }
 
 enum AudioCodec: String, Codable, CaseIterable, Identifiable {
@@ -162,6 +245,7 @@ struct ConversionProgress: Codable, Hashable {
     var downloadSpeed: String = "-"
     var downloadProgress: Double = 0
     var diagnostic: String = ""
+    var eventLog: [String] = []
 }
 
 struct ConversionJob: Codable, Identifiable, Hashable {
