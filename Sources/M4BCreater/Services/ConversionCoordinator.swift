@@ -259,7 +259,7 @@ final class ConversionCoordinator: ObservableObject {
         do {
             guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             var job = jobs[index]
-            update(jobID: jobID, stage: .buildingChapters, total: 0.05, currentItem: "校验章节清单")
+            update(jobID: jobID, stage: .buildingChapters, total: 0, currentItem: "校验章节清单")
             let chapters = normalizedChapters(job.chapters)
             appendLog(jobID: jobID, "校验章节：\(chapters.count) 条音轨")
 
@@ -270,11 +270,11 @@ final class ConversionCoordinator: ObservableObject {
             if let refreshed = jobs.first(where: { $0.id == jobID }) {
                 job = refreshed
             }
-            update(jobID: jobID, stage: .transcoding, total: 0.08, currentItem: "准备转码")
+            update(jobID: jobID, stage: .transcoding, total: 0, currentItem: "准备转码")
             appendLog(jobID: jobID, "开始转码流水线")
             let intermediateTracks = try await transcodePipeline(for: job)
 
-            update(jobID: jobID, stage: .packaging, total: 0.85, currentItem: "封装 M4B")
+            update(jobID: jobID, stage: .packaging, total: 1, currentItem: "封装 M4B")
             appendLog(jobID: jobID, "开始封装 M4B")
             let localOutput = try cacheManager.finalOutputURL(for: job, settings: settings)
             try await ffmpegRunner.packageM4B(jobID: jobID, intermediateTracks: intermediateTracks, chapters: job.chapters, metadata: job.metadata, encodingSettings: job.encodingSettings, outputURL: localOutput) { [weak self] progress in
@@ -283,7 +283,7 @@ final class ConversionCoordinator: ObservableObject {
                 }
             }
 
-            update(jobID: jobID, stage: .writingOutput, total: 0.92, currentItem: "写入输出目录")
+            update(jobID: jobID, stage: .writingOutput, total: 1, currentItem: "写入输出目录")
             appendLog(jobID: jobID, "写入输出：\(job.output.displayPath)")
             try await writeOutput(localOutput: localOutput, job: job)
 
@@ -389,6 +389,7 @@ final class ConversionCoordinator: ObservableObject {
             let outputURL = try cacheManager.intermediateTrackURL(for: job, chapter: chapter, settings: settings)
             if try cacheManager.intermediateTrackIsComplete(for: job, chapter: chapter, settings: settings) {
                 appendLog(jobID: job.id, "跳过已完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
+                update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
                 outputs.append(outputURL)
                 continue
             }
@@ -396,7 +397,7 @@ final class ConversionCoordinator: ObservableObject {
                 appendLog(jobID: job.id, "清理未完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
                 try cacheManager.removeIntermediateTrack(for: job, chapter: chapter, settings: settings)
             }
-            update(jobID: job.id, stage: .transcoding, total: progressBase(index: index, count: chapters.count), currentItem: chapter.title)
+            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 0), currentItem: chapter.title)
             appendLog(jobID: job.id, "转码音轨 \(index + 1)/\(chapters.count)：\(chapter.title)，编码器 \(ffmpegRunner.audioEncoderName(for: job.encodingSettings))")
             let encoded = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
                 Task { @MainActor in
@@ -405,6 +406,7 @@ final class ConversionCoordinator: ObservableObject {
             }
             try cacheManager.markIntermediateTrackComplete(for: job, chapter: chapter, settings: settings)
             outputs.append(encoded)
+            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
             appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapter.title)")
         }
         return outputs
@@ -426,8 +428,7 @@ final class ConversionCoordinator: ObservableObject {
             do {
                 try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID, timeoutInterval: timeout) { [weak self] transfer in
                     Task { @MainActor in
-                        let total = 0.08 + ((Double(position) + transfer.fraction) / Double(max(totalCount, 1))) * 0.20
-                        self?.updateDownloadProgress(jobID: job.id, chapter: chapter, total: total, transfer: transfer)
+                        self?.updateDownloadProgress(jobID: job.id, chapter: chapter, transfer: transfer)
                     }
                 }
                 break
@@ -456,13 +457,13 @@ final class ConversionCoordinator: ObservableObject {
         case .local:
             try await localProvider.upload(from: localOutput, to: destination) { [weak self] progress in
                 Task { @MainActor in
-                    self?.update(jobID: job.id, stage: .writingOutput, total: 0.92 + progress * 0.08, currentItem: "写入本地")
+                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "写入本地")
                 }
             }
         case .webDAV:
             try await webDAVProvider.upload(from: localOutput, to: destination, credentialID: job.output.credentialID) { [weak self] progress in
                 Task { @MainActor in
-                    self?.update(jobID: job.id, stage: .writingOutput, total: 0.92 + progress * 0.08, currentItem: "上传 WebDAV")
+                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "上传 WebDAV")
                 }
             }
         }
@@ -480,7 +481,7 @@ final class ConversionCoordinator: ObservableObject {
     private func applyFFmpegProgress(jobID: UUID, progress: FFmpegProgress) {
         guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        jobs[index].progress.total = max(jobs[index].progress.total, 0.35)
+        jobs[index].progress.total = max(jobs[index].progress.total, 1)
         jobs[index].progress.currentFile = progress.currentFile
         jobs[index].progress.speed = progress.speed
         jobs[index].progress.eta = progress.eta
@@ -495,7 +496,10 @@ final class ConversionCoordinator: ObservableObject {
         guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
         guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         jobs[jobIndex].stage = .transcoding
-        jobs[jobIndex].progress.total = max(jobs[jobIndex].progress.total, progressBase(index: index, count: count))
+        jobs[jobIndex].progress.total = max(
+            jobs[jobIndex].progress.total,
+            transcodeProgress(index: index, count: count, fileProgress: progress.currentFile)
+        )
         jobs[jobIndex].progress.currentFile = progress.currentFile
         jobs[jobIndex].progress.speed = progress.speed
         jobs[jobIndex].progress.eta = progress.eta
@@ -535,13 +539,12 @@ final class ConversionCoordinator: ObservableObject {
         lastFFmpegLogAtByJobID[jobID] = now
     }
 
-    private func updateDownloadProgress(jobID: UUID, chapter: Chapter, total: Double, transfer: TransferProgress) {
+    private func updateDownloadProgress(jobID: UUID, chapter: Chapter, transfer: TransferProgress) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let transferred = transfer.bytesTransferred.formattedBytes
         let expected = transfer.totalBytes?.formattedBytes ?? "未知大小"
         if jobs[index].stage.allowsDownloadProgressToDriveMainProgress {
             jobs[index].stage = .preparingSources
-            jobs[index].progress.total = min(max(total, 0), 1)
             jobs[index].progress.currentFile = transfer.fraction
             jobs[index].progress.currentItem = chapter.title
         }
@@ -661,8 +664,9 @@ final class ConversionCoordinator: ObservableObject {
         MediaFileTypes.isAudioFile(url)
     }
 
-    private func progressBase(index: Int, count: Int) -> Double {
-        0.28 + (Double(index) / Double(max(count, 1))) * 0.55
+    private func transcodeProgress(index: Int, count: Int, fileProgress: Double) -> Double {
+        let boundedFileProgress = min(max(fileProgress, 0), 1)
+        return (Double(index) + boundedFileProgress) / Double(max(count, 1))
     }
 
     private static func safeFileName(_ value: String) -> String {
