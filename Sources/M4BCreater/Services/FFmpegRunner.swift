@@ -13,6 +13,7 @@ struct FFmpegProgress: Hashable {
 @MainActor
 final class FFmpegRunner {
     private var processByJobID: [UUID: Process] = [:]
+    private var cachedAACEncoderName: String?
 
     func bundledFFmpegURL() -> URL? {
         bundledExecutableURL(named: "ffmpeg")
@@ -29,6 +30,13 @@ final class FFmpegRunner {
         return FileManager.default.isExecutableFile(atPath: ffmpeg.path(percentEncoded: false))
             ? "FFmpeg 已就绪"
             : "FFmpeg 存在但不可执行"
+    }
+
+    func audioEncoderName(for settings: EncodingSettings) -> String {
+        switch settings.codec {
+        case .aac:
+            preferredAACEncoderName()
+        }
     }
 
     func packageM4B(
@@ -71,7 +79,7 @@ final class FFmpegRunner {
             "-y",
             "-i", sourceURL.path(percentEncoded: false),
             "-vn",
-            "-c:a", encodingSettings.codec.ffmpegName,
+            "-c:a", audioEncoderName(for: encodingSettings),
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
@@ -144,7 +152,7 @@ final class FFmpegRunner {
             "-y",
             "-i", sourceURL.path(percentEncoded: false),
             "-vn",
-            "-c:a", encodingSettings.codec.ffmpegName,
+            "-c:a", audioEncoderName(for: encodingSettings),
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
@@ -246,6 +254,43 @@ final class FFmpegRunner {
     private static func formatTimestamp(_ seconds: TimeInterval) -> String {
         let total = max(Int(seconds), 0)
         return String(format: "%02d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+    }
+
+    private func preferredAACEncoderName() -> String {
+        if let cachedAACEncoderName {
+            return cachedAACEncoderName
+        }
+        let encoderName = availableEncoderNames().contains("aac_at") ? "aac_at" : "aac"
+        cachedAACEncoderName = encoderName
+        return encoderName
+    }
+
+    private func availableEncoderNames() -> Set<String> {
+        guard let ffmpeg = bundledFFmpegURL() else {
+            return []
+        }
+        let process = Process()
+        process.executableURL = ffmpeg
+        process.arguments = ["-hide_banner", "-encoders"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+        guard process.terminationStatus == 0 else {
+            return []
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return Set(text.split(whereSeparator: \.isNewline).compactMap { line in
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2, parts[0].contains("A") else { return nil }
+            return String(parts[1])
+        })
     }
 
     private func durations(for urls: [URL]) async -> [TimeInterval] {

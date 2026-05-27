@@ -25,10 +25,10 @@ struct StorageAndCacheTests {
             encodingSettings: EncodingSettings(codec: .aac, bitrateKbps: 320)
         )
 
-        #expect(args.contains("aac"))
         #expect(args.contains("320k"))
         #expect(args.contains("-progress"))
         #expect(args.contains("pipe:2"))
+        #expect(args.contains(runner.audioEncoderName(for: EncodingSettings(codec: .aac, bitrateKbps: 320))))
     }
 
     @Test
