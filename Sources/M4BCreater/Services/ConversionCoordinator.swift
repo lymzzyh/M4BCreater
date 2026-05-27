@@ -341,7 +341,7 @@ final class ConversionCoordinator: ObservableObject {
         func scheduleWebDAVPrefetches(from startIndex: Int) {
             guard job.input.kind == .webDAV else { return }
             let prefetchCount = min(max(settings.webDAVPrefetchCount, 1), 3)
-            let endIndex = min(chapters.count, startIndex + prefetchCount)
+            let endIndex = min(chapters.count, startIndex + prefetchCount + 1)
             guard startIndex < endIndex else { return }
             for prefetchIndex in startIndex..<endIndex where prefetchTasks[prefetchIndex] == nil {
                 prefetchTasks[prefetchIndex] = Task {
@@ -368,6 +368,7 @@ final class ConversionCoordinator: ObservableObject {
 
             let outputURL = try cacheManager.intermediateTrackURL(for: job, chapter: chapter, settings: settings)
             if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
+                appendLog(jobID: job.id, "跳过已完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
                 outputs.append(outputURL)
                 continue
             }
@@ -379,6 +380,7 @@ final class ConversionCoordinator: ObservableObject {
                 }
             }
             outputs.append(encoded)
+            appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapter.title)")
         }
         return outputs
     }
@@ -465,6 +467,7 @@ final class ConversionCoordinator: ObservableObject {
 
     private func applyTrackProgress(jobID: UUID, chapter: Chapter, index: Int, count: Int, progress: FFmpegProgress) {
         guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[jobIndex].stage = .transcoding
         jobs[jobIndex].progress.total = max(jobs[jobIndex].progress.total, progressBase(index: index, count: count))
         jobs[jobIndex].progress.currentFile = progress.currentFile
         jobs[jobIndex].progress.speed = progress.speed
@@ -480,10 +483,12 @@ final class ConversionCoordinator: ObservableObject {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let transferred = transfer.bytesTransferred.formattedBytes
         let expected = transfer.totalBytes?.formattedBytes ?? "未知大小"
-        jobs[index].stage = .preparingSources
-        jobs[index].progress.total = min(max(total, 0), 1)
-        jobs[index].progress.currentFile = transfer.fraction
-        jobs[index].progress.currentItem = chapter.title
+        if jobs[index].stage.allowsDownloadProgressToDriveMainProgress {
+            jobs[index].stage = .preparingSources
+            jobs[index].progress.total = min(max(total, 0), 1)
+            jobs[index].progress.currentFile = transfer.fraction
+            jobs[index].progress.currentItem = chapter.title
+        }
         jobs[index].progress.downloadProgress = transfer.fraction
         jobs[index].progress.downloadSpeed = transfer.speedLabel
         jobs[index].progress.diagnostic = "WebDAV 下载 \(chapter.sourceURL.lastPathComponent)：\(transferred) / \(expected)"
@@ -495,7 +500,9 @@ final class ConversionCoordinator: ObservableObject {
     private func updateDownloadRetry(jobID: UUID, chapter: Chapter, attempt: Int, maxRetries: Int, error: Error) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let message = "WebDAV 下载重试 \(attempt)/\(maxRetries)：\(chapter.sourceURL.lastPathComponent)，\(Self.errorMessage(error))"
-        jobs[index].stage = .preparingSources
+        if jobs[index].stage.allowsDownloadProgressToDriveMainProgress {
+            jobs[index].stage = .preparingSources
+        }
         jobs[index].progress.diagnostic = message
         appendLog(jobID: jobID, message, persistImmediately: false)
         jobs[index].updatedAt = Date()
@@ -607,6 +614,17 @@ enum ConversionError: LocalizedError {
             "输入目录中没有找到可转换的音频文件。"
         case .interrupted:
             "任务已暂停或取消。"
+        }
+    }
+}
+
+private extension JobStage {
+    var allowsDownloadProgressToDriveMainProgress: Bool {
+        switch self {
+        case .created, .preparingSources, .buildingChapters:
+            true
+        case .scrapingMetadata, .transcoding, .packaging, .writingOutput, .finished:
+            false
         }
     }
 }

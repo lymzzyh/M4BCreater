@@ -66,6 +66,8 @@ final class FFmpegRunner {
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let arguments = [
             "-hide_banner",
+            "-nostats",
+            "-progress", "pipe:2",
             "-y",
             "-i", sourceURL.path(percentEncoded: false),
             "-vn",
@@ -73,7 +75,8 @@ final class FFmpegRunner {
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
-        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progress: progress)
+        let duration = (try? await probeDuration(sourceURL)) ?? 0
+        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: duration, progress: progress)
         return outputURL
     }
 
@@ -100,6 +103,8 @@ final class FFmpegRunner {
 
         var arguments = [
             "-hide_banner",
+            "-nostats",
+            "-progress", "pipe:2",
             "-y",
             "-f", "concat",
             "-safe", "0",
@@ -128,12 +133,14 @@ final class FFmpegRunner {
             "-metadata", "comment=\(metadataComment(metadata))",
             outputURL.path(percentEncoded: false)
         ]
-        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progress: progress)
+        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: durations.reduce(0, +), progress: progress)
     }
 
     func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
         [
             "-hide_banner",
+            "-nostats",
+            "-progress", "pipe:2",
             "-y",
             "-i", sourceURL.path(percentEncoded: false),
             "-vn",
@@ -161,6 +168,7 @@ final class FFmpegRunner {
         jobID: UUID,
         executable: URL,
         arguments: [String],
+        progressDuration: TimeInterval,
         progress: @escaping @Sendable (FFmpegProgress) -> Void
     ) async throws {
         let process = Process()
@@ -172,8 +180,10 @@ final class FFmpegRunner {
         processByJobID[jobID] = process
 
         let reader = Task {
+            var current = FFmpegProgress(total: 0, currentFile: 0, speed: "-", eta: "-", currentItem: "FFmpeg", logLine: "FFmpeg 已启动")
             for try await line in pipe.fileHandleForReading.bytes.lines {
-                progress(Self.parse(line: line))
+                current = Self.parse(line: line, duration: progressDuration, current: current)
+                progress(current)
             }
         }
 
@@ -196,10 +206,46 @@ final class FFmpegRunner {
         processByJobID[jobID] = nil
     }
 
-    private static func parse(line: String) -> FFmpegProgress {
-        let speed = line.components(separatedBy: "speed=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
-        let time = line.components(separatedBy: "time=").dropFirst().first?.components(separatedBy: .whitespaces).first ?? "-"
-        return FFmpegProgress(total: 0, currentFile: 0, speed: speed, eta: time, currentItem: "FFmpeg", logLine: line)
+    private static func parse(line: String, duration: TimeInterval, current: FFmpegProgress) -> FFmpegProgress {
+        var next = current
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.logLine = trimmed
+
+        if let value = value(in: trimmed, key: "out_time_ms"), let microseconds = Double(value) {
+            let seconds = microseconds / 1_000_000
+            next.currentFile = fraction(seconds: seconds, duration: duration)
+            next.eta = formatTimestamp(seconds)
+        } else if let value = value(in: trimmed, key: "out_time"), let seconds = seconds(fromTimestamp: value) {
+            next.currentFile = fraction(seconds: seconds, duration: duration)
+            next.eta = value
+        } else if let value = value(in: trimmed, key: "speed") {
+            next.speed = value.isEmpty ? "-" : value
+        } else if value(in: trimmed, key: "progress") == "end" {
+            next.currentFile = 1
+        }
+        return next
+    }
+
+    private static func value(in line: String, key: String) -> String? {
+        let prefix = "\(key)="
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count))
+    }
+
+    private static func fraction(seconds: TimeInterval, duration: TimeInterval) -> Double {
+        guard duration > 0 else { return 0 }
+        return min(max(seconds / duration, 0), 1)
+    }
+
+    private static func seconds(fromTimestamp value: String) -> TimeInterval? {
+        let parts = value.split(separator: ":").compactMap(Double.init)
+        guard parts.count == 3 else { return nil }
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    }
+
+    private static func formatTimestamp(_ seconds: TimeInterval) -> String {
+        let total = max(Int(seconds), 0)
+        return String(format: "%02d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
     }
 
     private func durations(for urls: [URL]) async -> [TimeInterval] {

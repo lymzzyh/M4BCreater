@@ -27,6 +27,8 @@ struct StorageAndCacheTests {
 
         #expect(args.contains("aac"))
         #expect(args.contains("320k"))
+        #expect(args.contains("-progress"))
+        #expect(args.contains("pipe:2"))
     }
 
     @Test
