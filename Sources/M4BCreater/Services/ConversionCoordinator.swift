@@ -16,6 +16,8 @@ final class ConversionCoordinator: ObservableObject {
     private let ffmpegRunner = FFmpegRunner()
     private let localProvider = LocalStorageProvider()
     private lazy var webDAVProvider = WebDAVStorageProvider(credentialStore: credentialStore)
+    private var lastFFmpegUIUpdateAtByJobID: [UUID: Date] = [:]
+    private var lastFFmpegLogAtByJobID: [UUID: Date] = [:]
 
     init() {
         let state = store.load()
@@ -476,6 +478,7 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private func applyFFmpegProgress(jobID: UUID, progress: FFmpegProgress) {
+        guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         jobs[index].progress.total = max(jobs[index].progress.total, 0.35)
         jobs[index].progress.currentFile = progress.currentFile
@@ -483,12 +486,13 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.eta = progress.eta
         jobs[index].progress.currentItem = progress.currentItem
         jobs[index].progress.logTail = progress.logLine
-        appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
+        appendFFmpegLogIfNeeded(jobID: jobID, progress: progress)
         jobs[index].updatedAt = Date()
         persist()
     }
 
     private func applyTrackProgress(jobID: UUID, chapter: Chapter, index: Int, count: Int, progress: FFmpegProgress) {
+        guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
         guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         jobs[jobIndex].stage = .transcoding
         jobs[jobIndex].progress.total = max(jobs[jobIndex].progress.total, progressBase(index: index, count: count))
@@ -497,9 +501,38 @@ final class ConversionCoordinator: ObservableObject {
         jobs[jobIndex].progress.eta = progress.eta
         jobs[jobIndex].progress.currentItem = chapter.title
         jobs[jobIndex].progress.logTail = progress.logLine
-        appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
+        appendFFmpegLogIfNeeded(jobID: jobID, progress: progress)
         jobs[jobIndex].updatedAt = Date()
         persist()
+    }
+
+    private func shouldApplyFFmpegProgress(jobID: UUID, progress: FFmpegProgress) -> Bool {
+        let now = Date()
+        if progress.isTerminal || progress.logLine == "FFmpeg 已启动" {
+            lastFFmpegUIUpdateAtByJobID[jobID] = now
+            return true
+        }
+        let lastUpdate = lastFFmpegUIUpdateAtByJobID[jobID] ?? .distantPast
+        guard now.timeIntervalSince(lastUpdate) >= 0.75 else {
+            return false
+        }
+        lastFFmpegUIUpdateAtByJobID[jobID] = now
+        return true
+    }
+
+    private func appendFFmpegLogIfNeeded(jobID: UUID, progress: FFmpegProgress) {
+        let now = Date()
+        if progress.isTerminal || progress.logLine == "FFmpeg 已启动" {
+            appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
+            lastFFmpegLogAtByJobID[jobID] = now
+            return
+        }
+        let lastLog = lastFFmpegLogAtByJobID[jobID] ?? .distantPast
+        guard now.timeIntervalSince(lastLog) >= 5 else {
+            return
+        }
+        appendLog(jobID: jobID, progress.logLine, persistImmediately: false)
+        lastFFmpegLogAtByJobID[jobID] = now
     }
 
     private func updateDownloadProgress(jobID: UUID, chapter: Chapter, total: Double, transfer: TransferProgress) {
@@ -691,5 +724,11 @@ private extension String {
     var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private extension FFmpegProgress {
+    var isTerminal: Bool {
+        currentFile >= 1 || logLine.hasPrefix("FFmpeg 退出")
     }
 }

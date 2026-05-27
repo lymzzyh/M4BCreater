@@ -199,7 +199,9 @@ final class FFmpegRunner {
             progress(current)
             for try await line in pipe.fileHandleForReading.bytes.lines {
                 current = Self.parse(line: line, duration: progressDuration, current: current)
-                progress(current)
+                if Self.isProgressFlush(line) {
+                    progress(current)
+                }
             }
         }
 
@@ -248,10 +250,17 @@ final class FFmpegRunner {
             next.eta = value
         } else if let value = value(in: trimmed, key: "speed") {
             next.speed = value.isEmpty ? "-" : value
-        } else if value(in: trimmed, key: "progress") == "end" {
-            next.currentFile = 1
+        } else if let value = value(in: trimmed, key: "progress") {
+            if value == "end" {
+                next.currentFile = 1
+            }
+            next.logLine = "time=\(next.eta) speed=\(next.speed) progress=\(value)"
         }
         return next
+    }
+
+    private static func isProgressFlush(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("progress=")
     }
 
     private static func value(in line: String, key: String) -> String? {
