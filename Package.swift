@@ -15,6 +15,9 @@ let package = Package(
             name: "M4BCreater",
             path: "Sources/M4BCreater",
             exclude: [
+                "Resources/AppIcon.icns",
+                "Resources/AppIcon.iconset",
+                "Resources/AppIcon.png",
                 "Resources/FFmpeg/ffmpeg-arm64",
                 "Resources/FFmpeg/ffmpeg-x86_64",
                 "Resources/FFmpeg/ffprobe-arm64",

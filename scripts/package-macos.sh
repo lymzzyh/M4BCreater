@@ -17,6 +17,7 @@ swift build -c release
 BIN_DIR="$(swift build -c release --show-bin-path)"
 EXECUTABLE="${BIN_DIR}/${APP_NAME}"
 RESOURCE_BUNDLE="${BIN_DIR}/${APP_NAME}_${APP_NAME}.bundle"
+APP_ICON="${ROOT_DIR}/Sources/M4BCreater/Resources/AppIcon.icns"
 
 if [[ ! -x "${EXECUTABLE}" ]]; then
   echo "Missing release executable: ${EXECUTABLE}" >&2
@@ -28,11 +29,20 @@ if [[ ! -d "${RESOURCE_BUNDLE}" ]]; then
   exit 1
 fi
 
+if [[ ! -f "${APP_ICON}" ]]; then
+  echo "Missing app icon: ${APP_ICON}" >&2
+  exit 1
+fi
+
 rm -rf "${APP_PATH}" "${DMG_ROOT}" "${DMG_PATH}"
 mkdir -p "${APP_PATH}/Contents/MacOS" "${APP_PATH}/Contents/Resources" "${DMG_ROOT}"
 
 cp "${EXECUTABLE}" "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 cp -R "${RESOURCE_BUNDLE}" "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle"
+cp "${APP_ICON}" "${APP_PATH}/Contents/Resources/AppIcon.icns"
+rm -rf "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle/AppIcon.icns" \
+       "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle/AppIcon.png" \
+       "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle"/icon_*.png
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle/ffmpeg" "${APP_PATH}/${APP_NAME}_${APP_NAME}.bundle/ffprobe"
 
@@ -49,6 +59,8 @@ cat > "${APP_PATH}/Contents/Info.plist" <<PLIST
   <string>${APP_NAME}</string>
   <key>CFBundleIdentifier</key>
   <string>${BUNDLE_ID}</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
