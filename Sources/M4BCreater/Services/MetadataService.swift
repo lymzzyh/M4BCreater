@@ -8,15 +8,12 @@ struct MetadataInspection: Hashable {
 
 @MainActor
 final class MetadataService {
-    private let audioExtensions = Set(["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"])
-    private let coverExtensions = Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"])
-
     func inspectLocalFolder(_ url: URL) async -> MetadataInspection {
         let files = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
         let metadataURL = files.first { $0.lastPathComponent.lowercased() == "metadata.json" }
             ?? files.first { $0.pathExtension.lowercased() == "nfo" }
         let coverURL = files.first(where: isCoverFile)
-        let audioFiles = ChapterSorter.sortedURLs(files.filter { audioExtensions.contains($0.pathExtension.lowercased()) })
+        let audioFiles = ChapterSorter.sortedURLs(files.filter(MediaFileTypes.isAudioFile))
         return inspectFolder(
             folderName: url.lastPathComponent,
             audioFiles: audioFiles,
@@ -66,12 +63,11 @@ final class MetadataService {
     }
 
     func isAudioFile(_ url: URL) -> Bool {
-        audioExtensions.contains(url.pathExtension.lowercased())
+        MediaFileTypes.isAudioFile(url)
     }
 
     func isCoverFile(_ url: URL) -> Bool {
-        url.deletingPathExtension().lastPathComponent.lowercased() == "cover"
-            && coverExtensions.contains(url.pathExtension.lowercased())
+        MediaFileTypes.isCoverFile(url)
     }
 
     private func parseMetadataFile(_ url: URL, fallback: BookMetadata) -> (metadata: BookMetadata, chapters: [ImportedMetadataChapter], warnings: [String]) {

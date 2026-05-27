@@ -623,7 +623,7 @@ private struct WebDAVTrackPicker: View {
         .task {
             do {
                 items = try await coordinator.listWebDAVDirectory(credentialID: job.input.credentialID ?? UUID(), url: job.input.url)
-                    .filter { !$0.isDirectory && ["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"].contains($0.url.pathExtension.lowercased()) }
+                    .filter { !$0.isDirectory && MediaFileTypes.isAudioFile($0.url) }
                 isLoading = false
             } catch {
                 errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

@@ -658,7 +658,7 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private static func isAudioFile(_ url: URL) -> Bool {
-        ["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"].contains(url.pathExtension.lowercased())
+        MediaFileTypes.isAudioFile(url)
     }
 
     private func progressBase(index: Int, count: Int) -> Double {

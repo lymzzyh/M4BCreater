@@ -75,8 +75,8 @@ struct StorageAndCacheTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        try Data("audio-2".utf8).write(to: root.appending(path: "第2集.m4a"))
-        try Data("audio-1".utf8).write(to: root.appending(path: "第1集.m4a"))
+        try Data("audio-2".utf8).write(to: root.appending(path: "第2集.wma"))
+        try Data("audio-1".utf8).write(to: root.appending(path: "第1集.wma"))
         try Data("cover".utf8).write(to: root.appending(path: "cover.jpg"))
         try Data("""
         {
@@ -111,7 +111,7 @@ struct StorageAndCacheTests {
         #expect(inspection.metadata.publishDate == "2025")
         #expect(inspection.metadata.coverURL?.lastPathComponent == "cover.jpg")
         #expect(inspection.chapters.map(\.title) == ["第一集", "第二集"])
-        #expect(inspection.chapters.map(\.sourceURL.lastPathComponent) == ["第1集.m4a", "第2集.m4a"])
+        #expect(inspection.chapters.map(\.sourceURL.lastPathComponent) == ["第1集.wma", "第2集.wma"])
         #expect(inspection.chapters[0].duration == 60.5)
         #expect(inspection.chapters[1].duration == 60.25)
     }
