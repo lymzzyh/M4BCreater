@@ -36,4 +36,4 @@ Place executable binaries here before packaging:
 
 The app starts without them, but conversion jobs fail until `ffmpeg` is present and executable.
 
-The currently bundled binaries are `x86_64`; they run on Apple Silicon through Rosetta. For release packaging, prefer `arm64` or universal binaries.
+The currently bundled binaries are universal (`x86_64` + `arm64`).

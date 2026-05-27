@@ -14,6 +14,12 @@ let package = Package(
         .executableTarget(
             name: "M4BCreater",
             path: "Sources/M4BCreater",
+            exclude: [
+                "Resources/FFmpeg/ffmpeg-arm64",
+                "Resources/FFmpeg/ffmpeg-x86_64",
+                "Resources/FFmpeg/ffprobe-arm64",
+                "Resources/FFmpeg/ffprobe-x86_64"
+            ],
             resources: [
                 .process("Resources")
             ]
