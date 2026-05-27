@@ -81,6 +81,7 @@ enum CacheError: LocalizedError {
 
 extension Int64 {
     var formattedBytes: String {
-        ByteCountFormatter.string(fromByteCount: self, countStyle: .file)
+        guard self > 0 else { return "0 KB" }
+        return ByteCountFormatter.string(fromByteCount: self, countStyle: .file)
     }
 }

@@ -430,7 +430,8 @@ final class ConversionCoordinator: ObservableObject {
 
     private func registerCacheEntry(jobID: UUID, item: StorageItem, localURL: URL, state: CacheEntryState) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        let entry = CacheEntry(remoteURL: item.url, localURL: localURL, byteSize: item.size, modifiedAt: item.modifiedAt, state: state, checksum: nil)
+        let cachedSize = state == .ready ? localFileSize(at: localURL) : nil
+        let entry = CacheEntry(remoteURL: item.url, localURL: localURL, byteSize: cachedSize ?? item.size, modifiedAt: item.modifiedAt, state: state, checksum: nil)
         if let entryIndex = jobs[index].cacheEntries.firstIndex(where: { $0.remoteURL == item.url }) {
             jobs[index].cacheEntries[entryIndex] = entry
         } else {
@@ -438,6 +439,11 @@ final class ConversionCoordinator: ObservableObject {
         }
         jobs[index].updatedAt = Date()
         persist()
+    }
+
+    private func localFileSize(at url: URL) -> Int64? {
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return nil }
+        return (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
     }
 
     private func setFailure(jobID: UUID, error: Error) {
