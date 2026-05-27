@@ -71,19 +71,23 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     func createJob(input: StorageLocation, output: StorageLocation, encodingSettings: EncodingSettings = .default) {
-        let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
-        let metadata = BookMetadata(title: title, author: "", narrator: "", album: title, description: "", coverURL: nil)
-        let job = ConversionJob(
-            title: title,
-            input: input,
-            output: output,
-            metadata: metadata,
-            encodingSettings: encodingSettings,
-            outputFileName: "\(Self.safeFileName(title)).m4b"
-        )
-        jobs.insert(job, at: 0)
-        selectedJobID = job.id
-        persist()
+        Task {
+            let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
+            let scan = await initialScan(for: input, fallbackTitle: title)
+            let job = ConversionJob(
+                title: scan.metadata.title.isEmpty ? title : scan.metadata.title,
+                input: input,
+                output: output,
+                metadata: scan.metadata,
+                chapters: scan.chapters,
+                encodingSettings: encodingSettings,
+                outputFileName: "\(Self.safeFileName(scan.metadata.title.isEmpty ? title : scan.metadata.title)).m4b",
+                errorMessage: scan.errorMessage
+            )
+            jobs.insert(job, at: 0)
+            selectedJobID = job.id
+            persist()
+        }
     }
 
     func startSelectedJob() {
@@ -259,13 +263,12 @@ final class ConversionCoordinator: ObservableObject {
         do {
             guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             var job = jobs[index]
-            update(jobID: jobID, stage: .buildingChapters, total: 0.05, currentItem: "生成章节清单")
-            let chapters = try await buildTrackPlan(for: job)
+            update(jobID: jobID, stage: .buildingChapters, total: 0.05, currentItem: "校验章节清单")
+            let chapters = normalizedChapters(job.chapters)
 
             guard !chapters.isEmpty else {
                 throw ConversionError.noAudioFiles
             }
-            updateChaptersForRun(jobID: jobID, chapters: chapters)
 
             if let refreshed = jobs.first(where: { $0.id == jobID }) {
                 job = refreshed
@@ -298,23 +301,23 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    private func buildTrackPlan(for job: ConversionJob) async throws -> [Chapter] {
-        if !job.chapters.isEmpty {
-            return normalizedChapters(job.chapters)
-        }
-        switch job.input.kind {
+    private func initialScan(for input: StorageLocation, fallbackTitle: String) async -> (metadata: BookMetadata, chapters: [Chapter], errorMessage: String?) {
+        switch input.kind {
         case .local:
-            let items = try await localProvider.list(job.input)
-            return normalizedChapters(items.filter { Self.isAudioFile($0.url) }.enumerated().map { index, item in
-                Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
-            })
+            let inspection = await metadataService.inspectLocalFolder(input.url)
+            return (inspection.metadata, normalizedChapters(inspection.chapters), nil)
         case .webDAV:
-            let items = try await webDAVProvider.list(job.input).filter { !$0.isDirectory && Self.isAudioFile($0.url) }
-            let totalBytes = items.reduce(Int64(0)) { $0 + $1.size }
-            try cacheManager.ensureCapacity(settings: settings, additionalBytes: totalBytes)
-            return normalizedChapters(items.enumerated().map { index, item in
-                Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
-            })
+            let metadata = BookMetadata(title: fallbackTitle, author: "", narrator: "", album: fallbackTitle, description: "", coverURL: nil)
+            do {
+                let items = try await webDAVProvider.list(input).filter { !$0.isDirectory && Self.isAudioFile($0.url) }
+                let chapters = normalizedChapters(items.enumerated().map { index, item in
+                    Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
+                })
+                return (metadata, chapters, nil)
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                return (metadata, [], "创建任务时扫描 WebDAV 音轨失败：\(message)")
+            }
         }
     }
 
