@@ -518,8 +518,21 @@ final class ConversionCoordinator: ObservableObject {
         } else {
             jobs[index].cacheEntries.append(entry)
         }
+        jobs[index].cacheEntries = orderedCacheEntries(for: jobs[index])
         jobs[index].updatedAt = Date()
         persist()
+    }
+
+    private func orderedCacheEntries(for job: ConversionJob) -> [CacheEntry] {
+        let orderByURL = Dictionary(uniqueKeysWithValues: normalizedChapters(job.chapters).enumerated().map { ($0.element.sourceURL, $0.offset) })
+        return job.cacheEntries.sorted { lhs, rhs in
+            let lhsOrder = orderByURL[lhs.remoteURL] ?? Int.max
+            let rhsOrder = orderByURL[rhs.remoteURL] ?? Int.max
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return lhs.remoteURL.lastPathComponent.localizedStandardCompare(rhs.remoteURL.lastPathComponent) == .orderedAscending
+        }
     }
 
     private func localFileSize(at url: URL) -> Int64? {

@@ -146,7 +146,7 @@ struct JobDetailView: View {
                 }
                 if !job.cacheEntries.isEmpty {
                     Divider()
-                    ForEach(job.cacheEntries.prefix(6)) { entry in
+                    ForEach(orderedCacheEntries.prefix(6)) { entry in
                         HStack {
                             Text(entry.remoteURL.lastPathComponent)
                                 .lineLimit(1)
@@ -158,6 +158,18 @@ struct JobDetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var orderedCacheEntries: [CacheEntry] {
+        let orderByURL = Dictionary(uniqueKeysWithValues: job.chapters.enumerated().map { ($0.element.sourceURL, $0.offset) })
+        return job.cacheEntries.sorted { lhs, rhs in
+            let lhsOrder = orderByURL[lhs.remoteURL] ?? Int.max
+            let rhsOrder = orderByURL[rhs.remoteURL] ?? Int.max
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return lhs.remoteURL.lastPathComponent.localizedStandardCompare(rhs.remoteURL.lastPathComponent) == .orderedAscending
         }
     }
 
