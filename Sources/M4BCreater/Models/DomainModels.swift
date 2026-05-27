@@ -362,13 +362,55 @@ struct AppSettings: Codable, Hashable {
     var cacheDirectory: URL
     var cacheLimitBytes: Int64
     var autoCleanCompletedCache: Bool
+    var webDAVMaxRetries: Int
+    var webDAVStallTimeoutSeconds: Double
+    var webDAVPrefetchCount: Int
 
     static var `default`: AppSettings {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         return AppSettings(
             cacheDirectory: base.appending(path: "M4BCreater", directoryHint: .isDirectory),
             cacheLimitBytes: 50 * 1024 * 1024 * 1024,
-            autoCleanCompletedCache: false
+            autoCleanCompletedCache: false,
+            webDAVMaxRetries: 3,
+            webDAVStallTimeoutSeconds: 30,
+            webDAVPrefetchCount: 1
         )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cacheDirectory
+        case cacheLimitBytes
+        case autoCleanCompletedCache
+        case webDAVMaxRetries
+        case webDAVStallTimeoutSeconds
+        case webDAVPrefetchCount
+    }
+
+    init(
+        cacheDirectory: URL,
+        cacheLimitBytes: Int64,
+        autoCleanCompletedCache: Bool,
+        webDAVMaxRetries: Int = 3,
+        webDAVStallTimeoutSeconds: Double = 30,
+        webDAVPrefetchCount: Int = 1
+    ) {
+        self.cacheDirectory = cacheDirectory
+        self.cacheLimitBytes = cacheLimitBytes
+        self.autoCleanCompletedCache = autoCleanCompletedCache
+        self.webDAVMaxRetries = webDAVMaxRetries
+        self.webDAVStallTimeoutSeconds = webDAVStallTimeoutSeconds
+        self.webDAVPrefetchCount = webDAVPrefetchCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let defaults = Self.default
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cacheDirectory = try container.decodeIfPresent(URL.self, forKey: .cacheDirectory) ?? defaults.cacheDirectory
+        cacheLimitBytes = try container.decodeIfPresent(Int64.self, forKey: .cacheLimitBytes) ?? defaults.cacheLimitBytes
+        autoCleanCompletedCache = try container.decodeIfPresent(Bool.self, forKey: .autoCleanCompletedCache) ?? defaults.autoCleanCompletedCache
+        webDAVMaxRetries = try container.decodeIfPresent(Int.self, forKey: .webDAVMaxRetries) ?? defaults.webDAVMaxRetries
+        webDAVStallTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .webDAVStallTimeoutSeconds) ?? defaults.webDAVStallTimeoutSeconds
+        webDAVPrefetchCount = try container.decodeIfPresent(Int.self, forKey: .webDAVPrefetchCount) ?? defaults.webDAVPrefetchCount
     }
 }

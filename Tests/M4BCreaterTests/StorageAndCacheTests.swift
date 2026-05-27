@@ -68,6 +68,22 @@ struct StorageAndCacheTests {
     }
 
     @Test
+    func legacySettingsDecodingDefaultsWebDAVTransferPolicy() throws {
+        let json = """
+        {
+          "cacheDirectory": "file:///tmp/M4BCreater/",
+          "cacheLimitBytes": 1024,
+          "autoCleanCompletedCache": false
+        }
+        """
+        let settings = try JSONDecoder.app.decode(AppSettings.self, from: Data(json.utf8))
+
+        #expect(settings.webDAVMaxRetries == 3)
+        #expect(settings.webDAVStallTimeoutSeconds == 30)
+        #expect(settings.webDAVPrefetchCount == 1)
+    }
+
+    @Test
     func chapterSorterOrdersArabicAndChineseNumbersNaturally() {
         let names = [
             "第十章.m4a",

@@ -104,6 +104,11 @@ struct SettingsView: View {
                 WebDAVServerDetailView(credential: selectedCredential)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+
+            Divider()
+                .padding(.vertical, 4)
+
+            webDAVTransferSettings
         }
         .sheet(isPresented: $showingAddServer) {
             WebDAVServerFormView {
@@ -123,6 +128,71 @@ struct SettingsView: View {
             if selectedCredentialID == nil {
                 selectedCredentialID = coordinator.webDAVCredentials.first?.id
             }
+        }
+    }
+
+    private var webDAVTransferSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("传输策略")
+                .font(.headline)
+
+            HStack {
+                Label("预取并发", systemImage: "square.stack.3d.up")
+                Spacer()
+                Picker("预取并发", selection: Binding(
+                    get: { settings.webDAVPrefetchCount },
+                    set: {
+                        settings.webDAVPrefetchCount = $0
+                        coordinator.updateSettings(settings)
+                    }
+                )) {
+                    Text("1 个").tag(1)
+                    Text("2 个").tag(2)
+                    Text("3 个").tag(3)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+            }
+
+            HStack {
+                Label("失败重试", systemImage: "arrow.clockwise")
+                Spacer()
+                Stepper(
+                    "\(settings.webDAVMaxRetries) 次",
+                    value: Binding(
+                        get: { settings.webDAVMaxRetries },
+                        set: {
+                            settings.webDAVMaxRetries = $0
+                            coordinator.updateSettings(settings)
+                        }
+                    ),
+                    in: 0...10
+                )
+                .frame(width: 130)
+            }
+
+            HStack {
+                Label("无响应超时", systemImage: "timer")
+                Spacer()
+                Stepper(
+                    "\(Int(settings.webDAVStallTimeoutSeconds)) 秒",
+                    value: Binding(
+                        get: { settings.webDAVStallTimeoutSeconds },
+                        set: {
+                            settings.webDAVStallTimeoutSeconds = $0
+                            coordinator.updateSettings(settings)
+                        }
+                    ),
+                    in: 5...180,
+                    step: 5
+                )
+                .frame(width: 150)
+            }
+
+            Text("下载使用系统下载任务，进度低频刷新；预取并发只影响 WebDAV 输入音轨，不改变转码并发。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 

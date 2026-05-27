@@ -95,41 +95,31 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
     }
 
     func download(from remoteURL: URL, to localURL: URL, credentialID: UUID?, progress: @escaping @Sendable (TransferProgress) -> Void) async throws {
+        try await download(from: remoteURL, to: localURL, credentialID: credentialID, timeoutInterval: 60, progress: progress)
+    }
+
+    func download(
+        from remoteURL: URL,
+        to localURL: URL,
+        credentialID: UUID?,
+        timeoutInterval: TimeInterval,
+        progress: @escaping @Sendable (TransferProgress) -> Void
+    ) async throws {
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         var request = URLRequest(url: remoteURL)
         request.httpMethod = "GET"
+        request.timeoutInterval = timeoutInterval
         applyAuthorization(to: &request, credentialID: credentialID)
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw StorageError.invalidResponse
-        }
-        let expectedBytes = Int64(http.value(forHTTPHeaderField: "Content-Length") ?? "")
         if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
             try FileManager.default.removeItem(at: localURL)
         }
-        FileManager.default.createFile(atPath: localURL.path(percentEncoded: false), contents: nil)
-        let handle = try FileHandle(forWritingTo: localURL)
-        defer { try? handle.close() }
-
-        var transferred: Int64 = 0
-        let start = Date()
-        var buffer = Data()
-        buffer.reserveCapacity(64 * 1024)
-
-        for try await byte in bytes {
-            buffer.append(byte)
-            if buffer.count >= 64 * 1024 {
-                try handle.write(contentsOf: buffer)
-                transferred += Int64(buffer.count)
-                buffer.removeAll(keepingCapacity: true)
-                progress(Self.transferProgress(transferred: transferred, total: expectedBytes, start: start))
-            }
-        }
-        if !buffer.isEmpty {
-            try handle.write(contentsOf: buffer)
-            transferred += Int64(buffer.count)
-        }
-        progress(Self.transferProgress(transferred: transferred, total: expectedBytes, start: start, forceComplete: true))
+        let operation = WebDAVDownloadOperation(
+            localURL: localURL,
+            requestTimeout: timeoutInterval,
+            progressInterval: 0.5,
+            progress: progress
+        )
+        try await operation.start(request: request)
     }
 
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -178,6 +168,191 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
             totalBytes: total,
             bytesPerSecond: Double(transferred) / elapsed
         )
+    }
+}
+
+private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let localURL: URL
+    private let requestTimeout: TimeInterval
+    private let progressInterval: TimeInterval
+    private let progress: @Sendable (TransferProgress) -> Void
+    private let lock = NSLock()
+
+    private var session: URLSession?
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var finishedResult: Result<Void, Error>?
+    private var startDate = Date()
+    private var lastProgressDate = Date.distantPast
+    private var lastProgressBytes: Int64 = 0
+    private var lastObservedBytes: Int64 = 0
+    private var expectedBytes: Int64?
+
+    init(
+        localURL: URL,
+        requestTimeout: TimeInterval,
+        progressInterval: TimeInterval,
+        progress: @escaping @Sendable (TransferProgress) -> Void
+    ) {
+        self.localURL = localURL
+        self.requestTimeout = requestTimeout
+        self.progressInterval = progressInterval
+        self.progress = progress
+    }
+
+    func start(request: URLRequest) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.withLock {
+                    self.continuation = continuation
+                    self.startDate = Date()
+                    self.lastProgressDate = self.startDate
+                    self.lastProgressBytes = 0
+                    self.lastObservedBytes = 0
+                    self.expectedBytes = nil
+                }
+
+                let configuration = URLSessionConfiguration.default
+                configuration.timeoutIntervalForRequest = requestTimeout
+                configuration.timeoutIntervalForResource = max(requestTimeout * 4, 3600)
+                configuration.waitsForConnectivity = true
+                configuration.allowsConstrainedNetworkAccess = true
+                configuration.httpMaximumConnectionsPerHost = 6
+
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                lock.withLock {
+                    self.session = session
+                }
+                session.downloadTask(with: request).resume()
+            }
+        } onCancel: {
+            lock.withLock {
+                session?.invalidateAndCancel()
+            }
+        }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let now = Date()
+        var shouldEmit = false
+        var transfer: TransferProgress?
+
+        lock.withLock {
+            lastObservedBytes = totalBytesWritten
+            expectedBytes = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
+            shouldEmit = now.timeIntervalSince(lastProgressDate) >= progressInterval
+            if shouldEmit {
+                let elapsed = max(now.timeIntervalSince(lastProgressDate), 0.001)
+                let currentSpeed = Double(totalBytesWritten - lastProgressBytes) / elapsed
+                transfer = Self.transferProgress(
+                    transferred: totalBytesWritten,
+                    total: expectedBytes,
+                    bytesPerSecond: currentSpeed
+                )
+                lastProgressDate = now
+                lastProgressBytes = totalBytesWritten
+            }
+        }
+
+        if shouldEmit, let transfer {
+            progress(transfer)
+        }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        guard let http = downloadTask.response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            finish(.failure(StorageError.invalidResponse))
+            return
+        }
+
+        do {
+            let manager = FileManager.default
+            try manager.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if manager.fileExists(atPath: localURL.path(percentEncoded: false)) {
+                try manager.removeItem(at: localURL)
+            }
+            try manager.moveItem(at: location, to: localURL)
+            let snapshot = lock.withLock { (lastObservedBytes, expectedBytes) }
+            let size = Int64((try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int(snapshot.0))
+            progress(Self.transferProgress(transferred: size, total: snapshot.1 ?? size, bytesPerSecond: finalSpeed(bytes: size), forceComplete: true))
+            finish(.success(()))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+        } else {
+            finish(.success(()))
+        }
+    }
+
+    private func finish(_ result: Result<Void, Error>) {
+        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+            guard self.continuation != nil else {
+                return nil
+            }
+            if finishedResult != nil {
+                return nil
+            }
+            finishedResult = result
+            let continuation = self.continuation
+            self.continuation = nil
+            session?.finishTasksAndInvalidate()
+            session = nil
+            return continuation
+        }
+
+        guard let continuation else { return }
+        switch result {
+        case .success:
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private func finalSpeed(bytes: Int64) -> Double {
+        let elapsed = max(Date().timeIntervalSince(startDate), 0.001)
+        return Double(bytes) / elapsed
+    }
+
+    private static func transferProgress(
+        transferred: Int64,
+        total: Int64?,
+        bytesPerSecond: Double,
+        forceComplete: Bool = false
+    ) -> TransferProgress {
+        let fraction = if let total, total > 0 {
+            min(max(Double(transferred) / Double(total), 0.0), 1.0)
+        } else {
+            forceComplete ? 1.0 : 0.0
+        }
+        return TransferProgress(
+            fraction: forceComplete ? 1 : fraction,
+            bytesTransferred: transferred,
+            totalBytes: total,
+            bytesPerSecond: bytesPerSecond
+        )
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 

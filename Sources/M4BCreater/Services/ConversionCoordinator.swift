@@ -333,21 +333,35 @@ final class ConversionCoordinator: ObservableObject {
     private func transcodePipeline(for job: ConversionJob) async throws -> [URL] {
         let chapters = normalizedChapters(job.chapters)
         var outputs: [URL] = []
-        var prefetchTask: Task<URL, Error>?
+        var prefetchTasks: [Int: Task<URL, Error>] = [:]
+        defer {
+            prefetchTasks.values.forEach { $0.cancel() }
+        }
+
+        func scheduleWebDAVPrefetches(from startIndex: Int) {
+            guard job.input.kind == .webDAV else { return }
+            let prefetchCount = min(max(settings.webDAVPrefetchCount, 1), 3)
+            let endIndex = min(chapters.count, startIndex + prefetchCount)
+            guard startIndex < endIndex else { return }
+            for prefetchIndex in startIndex..<endIndex where prefetchTasks[prefetchIndex] == nil {
+                prefetchTasks[prefetchIndex] = Task {
+                    try await downloadChapter(chapters[prefetchIndex], job: job, position: prefetchIndex, totalCount: chapters.count)
+                }
+            }
+        }
 
         for index in chapters.indices {
             guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
             let chapter = chapters[index]
             let localSource: URL
             if job.input.kind == .webDAV {
-                if prefetchTask == nil {
-                    prefetchTask = Task { try await downloadChapter(chapter, job: job, position: index, totalCount: chapters.count) }
+                scheduleWebDAVPrefetches(from: index)
+                guard let prefetchTask = prefetchTasks[index] else {
+                    throw ConversionError.interrupted
                 }
-                localSource = try await prefetchTask!.value
-                let nextIndex = chapters.index(after: index)
-                prefetchTask = chapters.indices.contains(nextIndex)
-                    ? Task { try await downloadChapter(chapters[nextIndex], job: job, position: nextIndex, totalCount: chapters.count) }
-                    : nil
+                localSource = try await prefetchTask.value
+                prefetchTasks[index] = nil
+                scheduleWebDAVPrefetches(from: index + 1)
             } else {
                 localSource = chapter.sourceURL
             }
@@ -378,10 +392,30 @@ final class ConversionCoordinator: ObservableObject {
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
         appendLog(jobID: job.id, "开始 WebDAV 下载：\(chapter.sourceURL.lastPathComponent)")
-        try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID) { [weak self] transfer in
-            Task { @MainActor in
-                let total = 0.08 + ((Double(position) + transfer.fraction) / Double(max(totalCount, 1))) * 0.20
-                self?.updateDownloadProgress(jobID: job.id, chapter: chapter, total: total, transfer: transfer)
+        let maxRetries = max(settings.webDAVMaxRetries, 0)
+        let timeout = max(settings.webDAVStallTimeoutSeconds, 5)
+        var attempt = 0
+        while true {
+            do {
+                try await webDAVProvider.download(from: chapter.sourceURL, to: localURL, credentialID: job.input.credentialID, timeoutInterval: timeout) { [weak self] transfer in
+                    Task { @MainActor in
+                        let total = 0.08 + ((Double(position) + transfer.fraction) / Double(max(totalCount, 1))) * 0.20
+                        self?.updateDownloadProgress(jobID: job.id, chapter: chapter, total: total, transfer: transfer)
+                    }
+                }
+                break
+            } catch {
+                if Task.isCancelled {
+                    throw ConversionError.interrupted
+                }
+                attempt += 1
+                try? FileManager.default.removeItem(at: localURL)
+                if attempt > maxRetries {
+                    registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .failed)
+                    appendLog(jobID: job.id, "WebDAV 下载失败：\(chapter.sourceURL.lastPathComponent)，\(Self.errorMessage(error))")
+                    throw error
+                }
+                updateDownloadRetry(jobID: job.id, chapter: chapter, attempt: attempt, maxRetries: maxRetries, error: error)
             }
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
@@ -454,6 +488,16 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.downloadSpeed = transfer.speedLabel
         jobs[index].progress.diagnostic = "WebDAV 下载 \(chapter.sourceURL.lastPathComponent)：\(transferred) / \(expected)"
         appendLog(jobID: jobID, jobs[index].progress.diagnostic, persistImmediately: false)
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
+    private func updateDownloadRetry(jobID: UUID, chapter: Chapter, attempt: Int, maxRetries: Int, error: Error) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let message = "WebDAV 下载重试 \(attempt)/\(maxRetries)：\(chapter.sourceURL.lastPathComponent)，\(Self.errorMessage(error))"
+        jobs[index].stage = .preparingSources
+        jobs[index].progress.diagnostic = message
+        appendLog(jobID: jobID, message, persistImmediately: false)
         jobs[index].updatedAt = Date()
         persist()
     }
@@ -536,6 +580,10 @@ final class ConversionCoordinator: ObservableObject {
         let sanitized = value.components(separatedBy: invalid).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return sanitized.isEmpty ? "Audiobook" : sanitized
+    }
+
+    private static func errorMessage(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     static func normalizedDirectoryURL(_ url: URL) -> URL {
