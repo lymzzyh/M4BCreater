@@ -121,8 +121,20 @@ final class FFmpegRunner {
             "-i", listURL.path(percentEncoded: false),
             "-i", metadataURL.path(percentEncoded: false)
         ]
-        if let coverURL = metadata.coverURL {
-            arguments += ["-i", coverURL.path(percentEncoded: false), "-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-map", "2:v", "-disposition:v:0", "attached_pic"]
+        if let coverURL = try await normalizedCoverURL(
+            jobID: jobID,
+            coverURL: metadata.coverURL,
+            workDirectory: outputURL.deletingLastPathComponent()
+        ) {
+            arguments += [
+                "-i", coverURL.path(percentEncoded: false),
+                "-map", "0:a",
+                "-map_metadata", "1",
+                "-map_chapters", "1",
+                "-map", "2:v",
+                "-disposition:v:0", "attached_pic",
+                "-c:v", "mjpeg"
+            ]
         } else {
             arguments += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-vn"]
         }
@@ -144,6 +156,44 @@ final class FFmpegRunner {
             outputURL.path(percentEncoded: false)
         ]
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: durations.reduce(0, +), progress: progress)
+    }
+
+    private func normalizedCoverURL(jobID: UUID, coverURL: URL?, workDirectory: URL) async throws -> URL? {
+        guard let coverURL else { return nil }
+        guard let ffmpeg = bundledFFmpegURL() else {
+            throw FFmpegError.missingBinary
+        }
+
+        let normalizedURL = workDirectory.appending(path: "cover-\(jobID.uuidString).jpg")
+        let sourcePath = coverURL.path(percentEncoded: false)
+        if ["jpg", "jpeg"].contains(coverURL.pathExtension.lowercased()) {
+            return coverURL
+        }
+
+        try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
+        let process = Process()
+        process.executableURL = ffmpeg
+        process.arguments = [
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i", sourcePath,
+            "-frames:v", "1",
+            "-update", "1",
+            normalizedURL.path(percentEncoded: false)
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: data, encoding: .utf8)
+                .map(Self.failureTail(from:))
+            throw FFmpegError.failed(status: process.terminationStatus, detail: detail)
+        }
+        return normalizedURL
     }
 
     func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
@@ -193,11 +243,14 @@ final class FFmpegRunner {
         process.standardError = pipe
         process.standardOutput = pipe
         processByJobID[jobID] = process
+        defer { processByJobID[jobID] = nil }
+        let recentOutput = RecentFFmpegLines(limit: 18)
 
         let reader = Task {
             var current = FFmpegProgress(total: 0, currentFile: 0, speed: "-", eta: "-", currentItem: "FFmpeg", logLine: "FFmpeg 已启动")
             progress(current)
             for try await line in pipe.fileHandleForReading.bytes.lines {
+                recentOutput.append(line)
                 current = Self.parse(line: line, duration: progressDuration, current: current)
                 if Self.isProgressFlush(line) {
                     progress(current)
@@ -222,7 +275,7 @@ final class FFmpegRunner {
                 if status == 0 {
                     completion.resume(.success(()))
                 } else {
-                    completion.resume(.failure(FFmpegError.failed(status: status)))
+                    completion.resume(.failure(FFmpegError.failed(status: status, detail: recentOutput.tail())))
                 }
             }
             do {
@@ -233,7 +286,6 @@ final class FFmpegRunner {
                 completion.resume(.failure(error))
             }
         }
-        processByJobID[jobID] = nil
     }
 
     private static func parse(line: String, duration: TimeInterval, current: FFmpegProgress) -> FFmpegProgress {
@@ -283,6 +335,13 @@ final class FFmpegRunner {
     private static func formatTimestamp(_ seconds: TimeInterval) -> String {
         let total = max(Int(seconds), 0)
         return String(format: "%02d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+    }
+
+    private static func failureTail(from text: String) -> String {
+        text.split(whereSeparator: \.isNewline)
+            .suffix(12)
+            .map(String.init)
+            .joined(separator: "\n")
     }
 
     private func preferredAACEncoderName() -> String {
@@ -448,6 +507,34 @@ private final class ProcessCompletion: @unchecked Sendable {
     }
 }
 
+private final class RecentFFmpegLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var lines: [String] = []
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func append(_ line: String) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lock.withLock {
+            lines.append(trimmed)
+            if lines.count > limit {
+                lines.removeFirst(lines.count - limit)
+            }
+        }
+    }
+
+    func tail() -> String? {
+        lock.withLock {
+            let text = lines.joined(separator: "\n")
+            return text.isEmpty ? nil : text
+        }
+    }
+}
+
 private extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
@@ -458,14 +545,18 @@ private extension NSLock {
 
 enum FFmpegError: LocalizedError {
     case missingBinary
-    case failed(status: Int32)
+    case failed(status: Int32, detail: String?)
 
     var errorDescription: String? {
         switch self {
         case .missingBinary:
             "未找到内置 FFmpeg。"
-        case .failed(let status):
-            "FFmpeg 执行失败，退出码 \(status)。"
+        case .failed(let status, let detail):
+            if let detail, !detail.isEmpty {
+                "FFmpeg 执行失败，退出码 \(status)。\n\(detail)"
+            } else {
+                "FFmpeg 执行失败，退出码 \(status)。"
+            }
         }
     }
 }
