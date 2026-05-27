@@ -84,6 +84,26 @@ struct StorageAndCacheTests {
     }
 
     @Test
+    func legacyProgressDecodingDefaultsDownloadFields() throws {
+        let json = """
+        {
+          "total": 0.25,
+          "currentFile": 0.5,
+          "speed": "1x",
+          "eta": "-",
+          "currentItem": "chapter",
+          "logTail": "line"
+        }
+        """
+        let progress = try JSONDecoder.app.decode(ConversionProgress.self, from: Data(json.utf8))
+
+        #expect(progress.total == 0.25)
+        #expect(progress.downloadSpeed == "-")
+        #expect(progress.downloadProgress == 0)
+        #expect(progress.eventLog.isEmpty)
+    }
+
+    @Test
     func chapterSorterOrdersArabicAndChineseNumbersNaturally() {
         let names = [
             "第十章.m4a",

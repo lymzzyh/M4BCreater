@@ -95,7 +95,16 @@ struct SettingsView: View {
                 .frame(minWidth: 260, minHeight: 240)
                 .overlay {
                     if coordinator.webDAVCredentials.isEmpty {
-                        ContentUnavailableView("暂无服务器", systemImage: "network", description: Text("添加 WebDAV 服务器后可在新建任务中浏览选择目录。"))
+                        VStack(spacing: 14) {
+                            ContentUnavailableView("暂无服务器", systemImage: "network", description: Text("添加 WebDAV 服务器后可在新建任务中浏览选择目录。"))
+                            Button {
+                                showingAddServer = true
+                            } label: {
+                                Label("添加服务器", systemImage: "plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding()
                     }
                 }
 

@@ -246,6 +246,35 @@ struct ConversionProgress: Codable, Hashable {
     var downloadProgress: Double = 0
     var diagnostic: String = ""
     var eventLog: [String] = []
+
+    enum CodingKeys: String, CodingKey {
+        case total
+        case currentFile
+        case speed
+        case eta
+        case currentItem
+        case logTail
+        case downloadSpeed
+        case downloadProgress
+        case diagnostic
+        case eventLog
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        total = try container.decodeIfPresent(Double.self, forKey: .total) ?? 0
+        currentFile = try container.decodeIfPresent(Double.self, forKey: .currentFile) ?? 0
+        speed = try container.decodeIfPresent(String.self, forKey: .speed) ?? "-"
+        eta = try container.decodeIfPresent(String.self, forKey: .eta) ?? "-"
+        currentItem = try container.decodeIfPresent(String.self, forKey: .currentItem) ?? "-"
+        logTail = try container.decodeIfPresent(String.self, forKey: .logTail) ?? ""
+        downloadSpeed = try container.decodeIfPresent(String.self, forKey: .downloadSpeed) ?? "-"
+        downloadProgress = try container.decodeIfPresent(Double.self, forKey: .downloadProgress) ?? 0
+        diagnostic = try container.decodeIfPresent(String.self, forKey: .diagnostic) ?? ""
+        eventLog = try container.decodeIfPresent([String].self, forKey: .eventLog) ?? []
+    }
 }
 
 struct ConversionJob: Codable, Identifiable, Hashable {
