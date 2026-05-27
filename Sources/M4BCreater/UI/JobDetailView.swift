@@ -45,12 +45,6 @@ struct JobDetailView: View {
             Spacer()
             HStack {
                 Button {
-                    coordinator.scrapeSelectedJob()
-                } label: {
-                    Label("刮削", systemImage: "sparkle.magnifyingglass")
-                }
-                .disabled(!job.isEditable)
-                Button {
                     if job.state == .running {
                         coordinator.pause(jobID: job.id)
                     } else if job.state == .paused {
@@ -293,20 +287,16 @@ private struct MetadataEditor: View {
                 }
             }
             .disabled(!job.isEditable)
-
-            HStack {
-                Spacer()
-                Button("保存元数据") {
-                    coordinator.updateMetadata(for: job.id, metadata: metadata)
-                }
-                .disabled(!job.isEditable)
-            }
         }
         .onAppear {
             metadata = job.metadata
         }
         .onChange(of: job.id) {
             metadata = job.metadata
+        }
+        .onChange(of: metadata) {
+            guard job.isEditable else { return }
+            coordinator.updateMetadata(for: job.id, metadata: metadata)
         }
     }
 }
@@ -392,11 +382,6 @@ private struct EncodingEditor: View {
             }
             .frame(width: 180)
 
-            Button("保存编码设置") {
-                coordinator.updateEncodingSettings(jobID: job.id, settings: settings)
-            }
-            .disabled(!job.isEditable)
-
             if !job.isEditable {
                 Label("已锁定", systemImage: "lock")
                     .foregroundStyle(.secondary)
@@ -409,6 +394,10 @@ private struct EncodingEditor: View {
         }
         .onChange(of: job.id) {
             settings = job.encodingSettings
+        }
+        .onChange(of: settings) {
+            guard job.isEditable else { return }
+            coordinator.updateEncodingSettings(jobID: job.id, settings: settings)
         }
     }
 }
@@ -437,10 +426,6 @@ private struct ChapterEditor: View {
                         Label("添加 WebDAV 音轨", systemImage: "network")
                     }
                     .disabled(job.input.kind != .webDAV)
-
-                    Button("保存章节") {
-                        coordinator.updateChapters(jobID: job.id, chapters: chapters)
-                    }
 
                     Button {
                         chapters = normalizeOrders(ChapterSorter.sortedChapters(chapters))
@@ -486,6 +471,9 @@ private struct ChapterEditor: View {
         .onChange(of: job.id) {
             chapters = job.chapters.sorted { $0.order < $1.order }
         }
+        .onChange(of: chapters) {
+            persistChapters()
+        }
         .sheet(isPresented: $showingWebDAVPicker) {
             WebDAVTrackPicker(job: job) { items in
                 coordinator.addWebDAVChapters(jobID: job.id, items: items)
@@ -521,6 +509,11 @@ private struct ChapterEditor: View {
 
     private func normalizeOrders() {
         chapters = normalizeOrders(chapters)
+    }
+
+    private func persistChapters() {
+        guard job.isEditable else { return }
+        coordinator.updateChapters(jobID: job.id, chapters: chapters)
     }
 
     private func normalizeOrders(_ input: [Chapter]) -> [Chapter] {

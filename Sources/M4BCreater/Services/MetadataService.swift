@@ -1,69 +1,124 @@
 import Foundation
 
+struct MetadataInspection: Hashable {
+    var metadata: BookMetadata
+    var chapters: [Chapter]
+    var warnings: [String] = []
+}
+
 @MainActor
 final class MetadataService {
     private let audioExtensions = Set(["mp3", "m4a", "m4b", "aac", "flac", "wav", "ogg"])
+    private let coverExtensions = Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"])
 
-    func inspectLocalFolder(_ url: URL) async -> (metadata: BookMetadata, chapters: [Chapter]) {
-        let folderName = url.lastPathComponent
+    func inspectLocalFolder(_ url: URL) async -> MetadataInspection {
+        let files = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+        let metadataURL = files.first { $0.lastPathComponent.lowercased() == "metadata.json" }
+            ?? files.first { $0.pathExtension.lowercased() == "nfo" }
+        let coverURL = files.first(where: isCoverFile)
+        let audioFiles = ChapterSorter.sortedURLs(files.filter { audioExtensions.contains($0.pathExtension.lowercased()) })
+        return inspectFolder(
+            folderName: url.lastPathComponent,
+            audioFiles: audioFiles,
+            metadataURL: metadataURL,
+            coverURL: coverURL
+        )
+    }
+
+    func inspectFolder(folderName: String, audioFiles: [URL], metadataURL: URL?, coverURL: URL?) -> MetadataInspection {
+        let sortedAudioFiles = ChapterSorter.sortedURLs(audioFiles)
         var metadata = BookMetadata(
             title: folderName,
             author: "",
             narrator: "",
             album: folderName,
             description: "",
-            coverURL: nil
+            coverURL: coverURL
         )
+        var importedChapters: [ImportedMetadataChapter] = []
+        var warnings: [String] = []
 
-        let files = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
-        if let nfo = files.first(where: { $0.pathExtension.lowercased() == "nfo" || $0.lastPathComponent.lowercased() == "metadata.json" }) {
-            metadata = parseMetadataFile(nfo, fallback: metadata)
+        if let metadataURL {
+            let imported = parseMetadataFile(metadataURL, fallback: metadata)
+            metadata = imported.metadata
+            importedChapters = imported.chapters
+            warnings.append(contentsOf: imported.warnings)
         }
-        if let cover = files.first(where: { ["jpg", "jpeg", "png", "webp"].contains($0.pathExtension.lowercased()) }) {
-            metadata.coverURL = cover
+        if let coverURL {
+            metadata.coverURL = coverURL
         }
-
-        let audioFiles = files
-            .filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-        let sortedAudioFiles = ChapterSorter.sortedURLs(audioFiles)
 
         let chapters = sortedAudioFiles.enumerated().map { index, file in
-            Chapter(
-                title: file.deletingPathExtension().lastPathComponent,
+            let imported = importedChapters.indices.contains(index) ? importedChapters[index] : nil
+            return Chapter(
+                title: imported?.title.nilIfEmpty ?? file.deletingPathExtension().lastPathComponent,
                 sourceURL: file,
-                duration: 0,
+                duration: imported.map { max($0.end - $0.start, 0) } ?? 0,
                 order: index
             )
         }
-        return (metadata, chapters)
-    }
 
-    func scrapeOpenLibrary(query: String) async throws -> [BookMetadata] {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        var components = URLComponents(string: "https://openlibrary.org/search.json")!
-        components.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "limit", value: "8")
-        ]
-        let (data, _) = try await URLSession.shared.data(from: components.url!)
-        let response = try JSONDecoder().decode(OpenLibrarySearchResponse.self, from: data)
-        return response.docs.map { doc in
-            BookMetadata(
-                title: doc.title ?? query,
-                author: doc.authorName?.joined(separator: ", ") ?? "",
-                narrator: "",
-                album: doc.title ?? query,
-                description: doc.firstSentence?.first ?? "",
-                coverURL: doc.coverID.map { URL(string: "https://covers.openlibrary.org/b/id/\($0)-L.jpg")! }
-            )
+        if !importedChapters.isEmpty, importedChapters.count != sortedAudioFiles.count {
+            warnings.append("metadata.json 章节数 \(importedChapters.count) 与音轨数 \(sortedAudioFiles.count) 不一致，已按重叠部分应用。")
         }
+
+        return MetadataInspection(metadata: metadata, chapters: chapters, warnings: warnings)
     }
 
-    private func parseMetadataFile(_ url: URL, fallback: BookMetadata) -> BookMetadata {
-        guard let data = try? Data(contentsOf: url) else { return fallback }
+    func isAudioFile(_ url: URL) -> Bool {
+        audioExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    func isCoverFile(_ url: URL) -> Bool {
+        url.deletingPathExtension().lastPathComponent.lowercased() == "cover"
+            && coverExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func parseMetadataFile(_ url: URL, fallback: BookMetadata) -> (metadata: BookMetadata, chapters: [ImportedMetadataChapter], warnings: [String]) {
+        guard let data = try? Data(contentsOf: url) else {
+            return (fallback, [], ["无法读取元数据文件。"])
+        }
+        if let imported = try? JSONDecoder().decode(ImportedMetadataFile.self, from: data) {
+            return (metadata(from: imported, fallback: fallback), imported.chapters ?? [], [])
+        }
         if let metadata = try? JSONDecoder().decode(BookMetadata.self, from: data) {
-            return metadata
+            return (metadata, [], [])
         }
+        return (parseTextMetadata(data: data, fallback: fallback), [], ["元数据文件格式无法完整识别，已尝试按文本键值解析。"])
+    }
+
+    private func metadata(from imported: ImportedMetadataFile, fallback: BookMetadata) -> BookMetadata {
+        let title = imported.title.nilIfEmpty ?? fallback.title
+        let subtitle = imported.subtitle?.nilIfEmpty
+        let authors = joined(imported.authors)
+        let narrators = joined(imported.narrators)
+        let series = joined(imported.series)
+        let genresAndTags = joined(uniqueValues((imported.genres ?? []) + (imported.tags ?? [])))
+        let album = if let subtitle {
+            "\(title) - \(subtitle)"
+        } else {
+            title
+        }
+
+        return BookMetadata(
+            title: title,
+            author: authors.nilIfEmpty ?? fallback.author,
+            narrator: narrators.nilIfEmpty ?? fallback.narrator,
+            album: album,
+            series: series,
+            genre: genresAndTags.nilIfEmpty ?? fallback.genre,
+            publisher: imported.publisher?.nilIfEmpty ?? fallback.publisher,
+            publishDate: imported.publishedDate?.nilIfEmpty ?? imported.publishedYear?.nilIfEmpty ?? fallback.publishDate,
+            language: imported.language?.nilIfEmpty ?? fallback.language,
+            copyright: fallback.copyright,
+            isbn: imported.isbn?.nilIfEmpty ?? fallback.isbn,
+            asin: imported.asin?.nilIfEmpty ?? fallback.asin,
+            description: imported.description?.nilIfEmpty ?? fallback.description,
+            coverURL: fallback.coverURL
+        )
+    }
+
+    private func parseTextMetadata(data: Data, fallback: BookMetadata) -> BookMetadata {
         guard let text = String(data: data, encoding: .utf8) else { return fallback }
         var result = fallback
         for line in text.components(separatedBy: .newlines) {
@@ -88,22 +143,70 @@ final class MetadataService {
         }
         return result
     }
+
+    private func joined(_ values: [String]?) -> String {
+        joined(values ?? [])
+    }
+
+    private func joined(_ values: [String]) -> String {
+        values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    private func uniqueValues(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !seen.contains(trimmed.lowercased()) else { continue }
+            seen.insert(trimmed.lowercased())
+            result.append(trimmed)
+        }
+        return result
+    }
 }
 
-private struct OpenLibrarySearchResponse: Decodable {
-    var docs: [OpenLibraryDoc]
-}
-
-private struct OpenLibraryDoc: Decodable {
+private struct ImportedMetadataFile: Decodable {
+    var tags: [String]?
+    var chapters: [ImportedMetadataChapter]?
     var title: String?
-    var authorName: [String]?
-    var firstSentence: [String]?
-    var coverID: Int?
+    var subtitle: String?
+    var authors: [String]?
+    var narrators: [String]?
+    var series: [String]?
+    var genres: [String]?
+    var publishedYear: String?
+    var publishedDate: String?
+    var publisher: String?
+    var description: String?
+    var isbn: String?
+    var asin: String?
+    var language: String?
+}
 
-    enum CodingKeys: String, CodingKey {
-        case title
-        case authorName = "author_name"
-        case firstSentence = "first_sentence"
-        case coverID = "cover_i"
+private struct ImportedMetadataChapter: Decodable, Hashable {
+    var id: Int?
+    var title: String
+    var start: TimeInterval
+    var end: TimeInterval
+}
+
+private extension Optional where Wrapped == String {
+    var nilIfEmpty: String? {
+        switch self {
+        case .some(let value):
+            value.nilIfEmpty
+        case .none:
+            nil
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

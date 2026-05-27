@@ -8,7 +8,6 @@ final class ConversionCoordinator: ObservableObject {
     @Published var selectedJobID: UUID?
     @Published var settings: AppSettings = .default
     @Published var webDAVCredentials: [WebDAVCredential] = []
-    @Published var ffmpegStatus: String = ""
 
     private let store = JobStore()
     private let credentialStore = CredentialStore()
@@ -27,7 +26,7 @@ final class ConversionCoordinator: ObservableObject {
             credentialStore.upsert(credential, password: nil)
         }
         normalizeRecoveredJobs()
-        ffmpegStatus = ffmpegRunner.validateBundledBinaries()
+        _ = ffmpegRunner.validateBundledBinaries()
         selectedJobID = jobs.first?.id
     }
 
@@ -56,7 +55,8 @@ final class ConversionCoordinator: ObservableObject {
                 metadata: inspection.metadata,
                 chapters: inspection.chapters,
                 encodingSettings: encodingSettings,
-                outputFileName: "\(Self.safeFileName(title)).m4b"
+                outputFileName: "\(Self.safeFileName(title)).m4b",
+                errorMessage: inspection.warnings.joined(separator: "\n").nilIfEmpty
             )
             jobs.insert(job, at: 0)
             selectedJobID = job.id
@@ -73,9 +73,11 @@ final class ConversionCoordinator: ObservableObject {
 
     func createJob(input: StorageLocation, output: StorageLocation, encodingSettings: EncodingSettings = .default) {
         Task {
+            let jobID = UUID()
             let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
-            let scan = await initialScan(for: input, fallbackTitle: title)
+            let scan = await initialScan(for: input, fallbackTitle: title, jobID: jobID)
             let job = ConversionJob(
+                id: jobID,
                 title: scan.metadata.title.isEmpty ? title : scan.metadata.title,
                 input: input,
                 output: output,
@@ -169,24 +171,6 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].outputFileName = "\(Self.safeFileName(jobs[index].title)).m4b"
         jobs[index].updatedAt = Date()
         persist()
-    }
-
-    func scrapeSelectedJob() {
-        guard let job = selectedJob else { return }
-        guard job.isEditable else { return }
-        Task {
-            do {
-                let candidates = try await metadataService.scrapeOpenLibrary(query: job.title)
-                guard let first = candidates.first, let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
-                jobs[index].metadata = first
-                jobs[index].title = first.title
-                jobs[index].outputFileName = "\(Self.safeFileName(first.title)).m4b"
-                jobs[index].updatedAt = Date()
-                persist()
-            } catch {
-                setFailure(jobID: job.id, error: error)
-            }
-        }
     }
 
     func updateEncodingSettings(jobID: UUID, settings: EncodingSettings) {
@@ -316,23 +300,51 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    private func initialScan(for input: StorageLocation, fallbackTitle: String) async -> (metadata: BookMetadata, chapters: [Chapter], errorMessage: String?) {
+    private func initialScan(for input: StorageLocation, fallbackTitle: String, jobID: UUID) async -> (metadata: BookMetadata, chapters: [Chapter], errorMessage: String?) {
         switch input.kind {
         case .local:
             let inspection = await metadataService.inspectLocalFolder(input.url)
-            return (inspection.metadata, normalizedChapters(inspection.chapters), nil)
+            return (inspection.metadata, normalizedChapters(inspection.chapters), inspection.warnings.joined(separator: "\n").nilIfEmpty)
         case .webDAV:
             let metadata = BookMetadata(title: fallbackTitle, author: "", narrator: "", album: fallbackTitle, description: "", coverURL: nil)
+            var warnings: [String] = []
             do {
-                let items = ChapterSorter.sortedItems(try await webDAVProvider.list(input).filter { !$0.isDirectory && Self.isAudioFile($0.url) })
-                let chapters = normalizedChapters(items.enumerated().map { index, item in
-                    Chapter(title: item.url.deletingPathExtension().lastPathComponent, sourceURL: item.url, duration: 0, order: index)
-                })
-                return (metadata, chapters, nil)
+                let items = try await webDAVProvider.list(input)
+                let audioItems = ChapterSorter.sortedItems(items.filter { !$0.isDirectory && Self.isAudioFile($0.url) })
+                let metadataItem = items.first { !$0.isDirectory && $0.url.lastPathComponent.lowercased() == "metadata.json" }
+                let coverItem = items.first { !$0.isDirectory && metadataService.isCoverFile($0.url) }
+                let metadataDownload = await downloadAuxiliaryItem(metadataItem, input: input, jobID: jobID)
+                let coverDownload = await downloadAuxiliaryItem(coverItem, input: input, jobID: jobID)
+                if let warning = metadataDownload.warning { warnings.append(warning) }
+                if let warning = coverDownload.warning { warnings.append(warning) }
+                let inspection = metadataService.inspectFolder(
+                    folderName: fallbackTitle,
+                    audioFiles: audioItems.map(\.url),
+                    metadataURL: metadataDownload.url,
+                    coverURL: coverDownload.url
+                )
+                warnings.append(contentsOf: inspection.warnings)
+                return (inspection.metadata, normalizedChapters(inspection.chapters), warnings.joined(separator: "\n").nilIfEmpty)
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 return (metadata, [], "创建任务时扫描 WebDAV 音轨失败：\(message)")
             }
+        }
+    }
+
+    private func downloadAuxiliaryItem(_ item: StorageItem?, input: StorageLocation, jobID: UUID) async -> (url: URL?, warning: String?) {
+        guard let item else { return (nil, nil) }
+        do {
+            let localURL = try cacheManager.localURLForCachedRemote(item.url, jobID: jobID, settings: settings)
+            try await webDAVProvider.download(
+                from: item.url,
+                to: localURL,
+                credentialID: input.credentialID,
+                timeoutInterval: max(settings.webDAVStallTimeoutSeconds, 5)
+            ) { _ in }
+            return (localURL, nil)
+        } catch {
+            return (nil, "WebDAV 辅助文件 \(item.url.lastPathComponent) 下载失败：\(Self.errorMessage(error))")
         }
     }
 
@@ -673,4 +685,11 @@ private extension DateFormatter {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }

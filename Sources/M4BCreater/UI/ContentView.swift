@@ -53,16 +53,6 @@ private struct SidebarView: View {
             }
 
             Spacer()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label(coordinator.ffmpegStatus, systemImage: "terminal")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                Text("WebDAV 为可选远程目录，本地输入输出始终可用。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .padding(20)
     }

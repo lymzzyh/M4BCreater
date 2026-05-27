@@ -55,8 +55,16 @@ final class CacheManager {
     }
 
     func localURLForCachedRemote(_ remoteURL: URL, job: ConversionJob, settings: AppSettings) throws -> URL {
+        try localURLForCachedRemote(remoteURL, jobID: job.id, settings: settings)
+    }
+
+    func localURLForCachedRemote(_ remoteURL: URL, jobID: UUID, settings: AppSettings) throws -> URL {
         let safeName = remoteURL.lastPathComponent.isEmpty ? UUID().uuidString : remoteURL.lastPathComponent
-        return try sourceDirectory(for: job, settings: settings).appending(path: safeName)
+        let directory = settings.cacheDirectory
+            .appending(path: jobID.uuidString, directoryHint: .isDirectory)
+            .appending(path: "sources", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appending(path: safeName)
     }
 
     func cacheBytes(in directory: URL) -> Int64 {

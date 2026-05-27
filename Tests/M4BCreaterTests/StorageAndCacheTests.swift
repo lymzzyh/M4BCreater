@@ -64,9 +64,56 @@ struct StorageAndCacheTests {
         let job = try JSONDecoder.app.decode(ConversionJob.self, from: Data(json.utf8))
 
         #expect(job.encodingSettings.codec == .aac)
-        #expect(job.encodingSettings.bitrateKbps == 64)
+        #expect(job.encodingSettings.bitrateKbps == 192)
         #expect(job.hasStarted)
         #expect(!job.isEditable)
+    }
+
+    @Test
+    func localMetadataJSONAndCoverAreImportedDuringScan() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("audio-2".utf8).write(to: root.appending(path: "第2集.m4a"))
+        try Data("audio-1".utf8).write(to: root.appending(path: "第1集.m4a"))
+        try Data("cover".utf8).write(to: root.appending(path: "cover.jpg"))
+        try Data("""
+        {
+          "tags": ["双男主", "校园"],
+          "chapters": [
+            { "id": 0, "title": "第一集", "start": 0, "end": 60.5 },
+            { "id": 1, "title": "第二集", "start": 60.5, "end": 120.75 }
+          ],
+          "title": "别读博，会脱单",
+          "subtitle": null,
+          "authors": ["Llosa"],
+          "narrators": [],
+          "series": [],
+          "genres": ["Chinese fiction"],
+          "publishedYear": "2025",
+          "publishedDate": null,
+          "publisher": null,
+          "description": "<p>讨厌鬼邻居是暗恋的数学教授。</p>",
+          "isbn": null,
+          "asin": null,
+          "language": null,
+          "explicit": false,
+          "abridged": false
+        }
+        """.utf8).write(to: root.appending(path: "metadata.json"))
+
+        let inspection = await MetadataService().inspectLocalFolder(root)
+
+        #expect(inspection.metadata.title == "别读博，会脱单")
+        #expect(inspection.metadata.author == "Llosa")
+        #expect(inspection.metadata.genre == "Chinese fiction, 双男主, 校园")
+        #expect(inspection.metadata.publishDate == "2025")
+        #expect(inspection.metadata.coverURL?.lastPathComponent == "cover.jpg")
+        #expect(inspection.chapters.map(\.title) == ["第一集", "第二集"])
+        #expect(inspection.chapters.map(\.sourceURL.lastPathComponent) == ["第1集.m4a", "第2集.m4a"])
+        #expect(inspection.chapters[0].duration == 60.5)
+        #expect(inspection.chapters[1].duration == 60.25)
     }
 
     @Test

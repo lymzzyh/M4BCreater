@@ -200,7 +200,7 @@ enum AudioCodec: String, Codable, CaseIterable, Identifiable {
 
 struct EncodingSettings: Codable, Hashable {
     var codec: AudioCodec = .aac
-    var bitrateKbps: Int = 64
+    var bitrateKbps: Int = 192
 
     static let availableBitrates = [32, 48, 64, 96, 128, 160, 192, 256, 320]
     static let `default` = EncodingSettings()
