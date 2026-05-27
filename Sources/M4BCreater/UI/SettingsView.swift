@@ -4,10 +4,8 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var coordinator: ConversionCoordinator
     @State private var settings: AppSettings = .default
-    @State private var davName = ""
-    @State private var davURL = ""
-    @State private var davUsername = ""
-    @State private var davPassword = ""
+    @State private var selectedCredentialID: UUID?
+    @State private var showingAddServer = false
 
     var body: some View {
         TabView {
@@ -64,49 +62,116 @@ struct SettingsView: View {
     }
 
     private var webDAVSettings: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("WebDAV 连接")
-                .font(.title3.weight(.semibold))
-
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
-                    Text("名称")
-                    TextField("家庭 NAS", text: $davName)
-                }
-                GridRow {
-                    Text("地址")
-                    TextField("https://example.com/dav/", text: $davURL)
-                }
-                GridRow {
-                    Text("用户名")
-                    TextField("username", text: $davUsername)
-                }
-                GridRow {
-                    Text("密码")
-                    SecureField("password", text: $davPassword)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("WebDAV 服务器")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button {
+                    showingAddServer = true
+                } label: {
+                    Label("添加服务器", systemImage: "plus")
                 }
             }
 
-            Button {
-                guard let url = URL(string: davURL), !davName.isEmpty else { return }
-                coordinator.upsertWebDAVCredential(name: davName, baseURL: url, username: davUsername, password: davPassword)
-                davName = ""
-                davURL = ""
-                davUsername = ""
-                davPassword = ""
-            } label: {
-                Label("保存连接", systemImage: "key")
-            }
+            HStack(spacing: 16) {
+                List(selection: $selectedCredentialID) {
+                    ForEach(coordinator.webDAVCredentials) { credential in
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(credential.name)
+                                Text(credential.baseURL.absoluteString)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        } icon: {
+                            Image(systemName: "server.rack")
+                        }
+                        .tag(Optional(credential.id))
+                    }
+                }
+                .frame(minWidth: 260, minHeight: 240)
+                .overlay {
+                    if coordinator.webDAVCredentials.isEmpty {
+                        ContentUnavailableView("暂无服务器", systemImage: "network", description: Text("添加 WebDAV 服务器后可在新建任务中浏览选择目录。"))
+                    }
+                }
 
-            List(coordinator.webDAVCredentials) { credential in
-                VStack(alignment: .leading) {
-                    Text(credential.name)
-                    Text(credential.baseURL.absoluteString)
-                        .font(.caption)
+                Divider()
+
+                WebDAVServerDetailView(credential: selectedCredential)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .sheet(isPresented: $showingAddServer) {
+            WebDAVServerFormView {
+                showingAddServer = false
+            } onSave: { name, baseURL, username, password in
+                let id = coordinator.upsertWebDAVCredential(
+                    name: name,
+                    baseURL: baseURL,
+                    username: username,
+                    password: password
+                )
+                selectedCredentialID = id
+                showingAddServer = false
+            }
+        }
+        .onAppear {
+            if selectedCredentialID == nil {
+                selectedCredentialID = coordinator.webDAVCredentials.first?.id
+            }
+        }
+    }
+
+    private var selectedCredential: WebDAVCredential? {
+        guard let selectedCredentialID else { return nil }
+        return coordinator.webDAVCredentials.first { $0.id == selectedCredentialID }
+    }
+
+    private struct WebDAVServerDetailView: View {
+        var credential: WebDAVCredential?
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 16) {
+                if let credential {
+                    Label("服务器详情", systemImage: "server.rack")
+                        .font(.headline)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        DetailRow(title: "名称", value: credential.name)
+                        DetailRow(title: "地址", value: credential.baseURL.absoluteString)
+                        DetailRow(title: "用户名", value: credential.username.isEmpty ? "未设置" : credential.username)
+                        DetailRow(title: "密码", value: "已保存在钥匙串引用中")
+                    }
+
+                    Text("新建任务时选择 WebDAV 目录，会使用这里保存的服务器和鉴权信息浏览远程目录。")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ContentUnavailableView("选择一个服务器", systemImage: "server.rack", description: Text("服务器详情会显示在这里。"))
                 }
             }
-            .frame(minHeight: 120)
+            .padding(4)
+        }
+    }
+
+    private struct DetailRow: View {
+        var title: String
+        var value: String
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+            }
         }
     }
 

@@ -370,69 +370,19 @@ private struct AddWebDAVServerView: View {
     @Environment(\.dismiss) private var dismiss
     var onSave: (UUID) -> Void
 
-    @State private var name = ""
-    @State private var baseURL = ""
-    @State private var username = ""
-    @State private var password = ""
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("添加 WebDAV 服务器")
-                .font(.title2.weight(.semibold))
-
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
-                GridRow {
-                    Text("名称")
-                    TextField("家庭 NAS", text: $name)
-                }
-                GridRow {
-                    Text("地址")
-                    TextField("https://example.com/dav/", text: $baseURL)
-                }
-                GridRow {
-                    Text("用户名")
-                    TextField("username", text: $username)
-                }
-                GridRow {
-                    Text("密码")
-                    SecureField("password", text: $password)
-                }
-            }
-            .textFieldStyle(.roundedBorder)
-
-            Spacer()
-
-            HStack {
-                Button("取消") {
-                    dismiss()
-                }
-                Spacer()
-                Button("保存") {
-                    save()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!isValid)
-            }
+        WebDAVServerFormView {
+            dismiss()
+        } onSave: { name, baseURL, username, password in
+            let id = coordinator.upsertWebDAVCredential(
+                name: name,
+                baseURL: baseURL,
+                username: username,
+                password: password
+            )
+            onSave(id)
+            dismiss()
         }
-        .padding(24)
-        .frame(width: 540, height: 300)
-    }
-
-    private var isValid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            URL(string: baseURL) != nil
-    }
-
-    private func save() {
-        guard let url = URL(string: baseURL) else { return }
-        let id = coordinator.upsertWebDAVCredential(
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            baseURL: url,
-            username: username,
-            password: password
-        )
-        onSave(id)
-        dismiss()
     }
 }
 
