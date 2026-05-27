@@ -140,7 +140,6 @@ final class FFmpegRunner {
         }
         arguments += [
             "-c:a", "copy",
-            "-movflags", "+faststart",
             "-metadata", "title=\(metadata.title)",
             "-metadata", "artist=\(metadata.author)",
             "-metadata", "album=\(metadata.album.isEmpty ? metadata.title : metadata.album)",
