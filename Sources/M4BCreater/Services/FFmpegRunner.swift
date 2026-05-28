@@ -107,6 +107,7 @@ final class FFmpegRunner {
         try listBody.write(to: listURL, atomically: true, encoding: .utf8)
         let metadataURL = outputURL.deletingLastPathComponent().appending(path: "metadata-\(jobID.uuidString).txt")
         let durations = await durations(for: intermediateTracks)
+        let totalDuration = durations.reduce(0, +)
         let ffmetadata = Self.buildFFMetadata(metadata: metadata, chapters: chapters, durations: durations)
         try ffmetadata.write(to: metadataURL, atomically: true, encoding: .utf8)
 
@@ -138,8 +139,22 @@ final class FFmpegRunner {
         } else {
             arguments += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-vn"]
         }
+        let muxingArguments = Self.m4bMuxingArguments(totalDuration: totalDuration, trackCount: intermediateTracks.count)
+        if !muxingArguments.isEmpty {
+            progress(FFmpegProgress(
+                total: 1,
+                currentFile: 0,
+                speed: "-",
+                eta: "-",
+                currentItem: "封装 M4B",
+                logLine: "超大 M4B 使用分片封装，避免写入 trailer 时一次性分配巨大索引。"
+            ))
+        }
         arguments += [
-            "-c:a", "copy",
+            "-c:a", "copy"
+        ]
+        arguments += muxingArguments
+        arguments += [
             "-metadata", "title=\(metadata.title)",
             "-metadata", "artist=\(metadata.author)",
             "-metadata", "album=\(metadata.album.isEmpty ? metadata.title : metadata.album)",
@@ -154,7 +169,7 @@ final class FFmpegRunner {
             "-metadata", "comment=\(metadataComment(metadata))",
             outputURL.path(percentEncoded: false)
         ]
-        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: durations.reduce(0, +), progress: progress)
+        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: totalDuration, progress: progress)
     }
 
     private func normalizedCoverURL(jobID: UUID, coverURL: URL?, workDirectory: URL) async throws -> URL? {
@@ -208,6 +223,20 @@ final class FFmpegRunner {
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
+    }
+
+    static func m4bMuxingArguments(totalDuration: TimeInterval, trackCount: Int) -> [String] {
+        guard shouldUseFragmentedM4B(totalDuration: totalDuration, trackCount: trackCount) else {
+            return []
+        }
+        return [
+            "-movflags", "+empty_moov+default_base_moof",
+            "-frag_duration", "60000000"
+        ]
+    }
+
+    static func shouldUseFragmentedM4B(totalDuration: TimeInterval, trackCount: Int) -> Bool {
+        totalDuration >= 72 * 60 * 60 || trackCount >= 500
     }
 
     func pause(jobID: UUID) {

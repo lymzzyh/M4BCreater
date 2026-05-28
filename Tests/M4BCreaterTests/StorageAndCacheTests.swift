@@ -36,6 +36,17 @@ struct StorageAndCacheTests {
     }
 
     @Test
+    func hugeM4BPackagingUsesFragmentedMuxing() {
+        let longBookArgs = FFmpegRunner.m4bMuxingArguments(totalDuration: 384 * 60 * 60, trackCount: 1208)
+        let normalBookArgs = FFmpegRunner.m4bMuxingArguments(totalDuration: 12 * 60 * 60, trackCount: 80)
+
+        #expect(longBookArgs.contains("-movflags"))
+        #expect(longBookArgs.contains("+empty_moov+default_base_moof"))
+        #expect(longBookArgs.contains("-frag_duration"))
+        #expect(normalBookArgs.isEmpty)
+    }
+
+    @Test
     func legacyJobDecodingDefaultsEncodingAndLockState() throws {
         let json = """
         {
