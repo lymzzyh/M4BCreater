@@ -57,7 +57,58 @@ struct SettingsView: View {
                     coordinator.updateSettings(settings)
                 }
             ))
+
+            Divider()
+
+            m4bPackagingSettings
             Spacer()
+        }
+    }
+
+    private var m4bPackagingSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("M4B 封装策略")
+                .font(.headline)
+
+            HStack {
+                Label("分片封装时长阈值", systemImage: "clock")
+                Spacer()
+                Stepper(
+                    "\(settings.fragmentedM4BThresholdHours) 小时",
+                    value: Binding(
+                        get: { settings.fragmentedM4BThresholdHours },
+                        set: {
+                            settings.fragmentedM4BThresholdHours = $0
+                            coordinator.updateSettings(settings)
+                        }
+                    ),
+                    in: 12...1000,
+                    step: 12
+                )
+                .frame(width: 150)
+            }
+
+            HStack {
+                Label("分片封装音轨阈值", systemImage: "music.note.list")
+                Spacer()
+                Stepper(
+                    "\(settings.fragmentedM4BThresholdTracks) 条",
+                    value: Binding(
+                        get: { settings.fragmentedM4BThresholdTracks },
+                        set: {
+                            settings.fragmentedM4BThresholdTracks = $0
+                            coordinator.updateSettings(settings)
+                        }
+                    ),
+                    in: 50...5000,
+                    step: 50
+                )
+                .frame(width: 150)
+            }
+
+            Text("超过任一阈值时使用分片封装，降低超大有声书在写入尾部索引时的内存压力。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 

@@ -37,13 +37,47 @@ struct StorageAndCacheTests {
 
     @Test
     func hugeM4BPackagingUsesFragmentedMuxing() {
-        let longBookArgs = FFmpegRunner.m4bMuxingArguments(totalDuration: 384 * 60 * 60, trackCount: 1208)
-        let normalBookArgs = FFmpegRunner.m4bMuxingArguments(totalDuration: 12 * 60 * 60, trackCount: 80)
+        let longBookArgs = FFmpegRunner.m4bMuxingArguments(
+            totalDuration: 384 * 60 * 60,
+            trackCount: 1208,
+            thresholdHours: 100,
+            thresholdTracks: 1_000
+        )
+        let normalBookArgs = FFmpegRunner.m4bMuxingArguments(
+            totalDuration: 12 * 60 * 60,
+            trackCount: 80,
+            thresholdHours: 100,
+            thresholdTracks: 1_000
+        )
 
         #expect(longBookArgs.contains("-movflags"))
         #expect(longBookArgs.contains("+empty_moov+default_base_moof"))
         #expect(longBookArgs.contains("-frag_duration"))
         #expect(normalBookArgs.isEmpty)
+    }
+
+    @Test
+    func fragmentedArtworkWriterInjectsCovrMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let mediaURL = root.appending(path: "book.m4b")
+        let coverURL = root.appending(path: "cover.jpg")
+        var media = Data()
+        media += testAtom("ftyp", Data("M4A \0\0\u{2}\0M4A ".utf8))
+        media += testAtom("moov", testAtom("mvhd", Data(repeating: 0, count: 100)))
+        media += testAtom("moof", Data())
+        media += testAtom("mdat", Data("audio".utf8))
+        try media.write(to: mediaURL)
+        try Data([0xff, 0xd8, 0xff, 0xd9]).write(to: coverURL)
+
+        try await MP4ArtworkWriter.injectArtwork(coverURL: coverURL, into: mediaURL)
+        let updated = try Data(contentsOf: mediaURL)
+
+        #expect(updated.count > media.count)
+        #expect(String(data: updated, encoding: .isoLatin1)?.contains("covr") == true)
+        #expect(String(data: updated, encoding: .isoLatin1)?.contains("data") == true)
     }
 
     @Test
@@ -145,6 +179,8 @@ struct StorageAndCacheTests {
         #expect(settings.webDAVMaxRetries == 3)
         #expect(settings.webDAVStallTimeoutSeconds == 30)
         #expect(settings.webDAVPrefetchCount == 1)
+        #expect(settings.fragmentedM4BThresholdHours == 72)
+        #expect(settings.fragmentedM4BThresholdTracks == 500)
     }
 
     @Test
@@ -226,4 +262,16 @@ struct StorageAndCacheTests {
             try manager.ensureCapacity(settings: settings, additionalBytes: 11)
         }
     }
+}
+
+private func testAtom(_ type: String, _ payload: Data) -> Data {
+    var result = Data()
+    let size = UInt32(payload.count + 8)
+    result.append(UInt8((size >> 24) & 0xff))
+    result.append(UInt8((size >> 16) & 0xff))
+    result.append(UInt8((size >> 8) & 0xff))
+    result.append(UInt8(size & 0xff))
+    result += Data(type.utf8.prefix(4))
+    result += payload
+    return result
 }

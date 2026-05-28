@@ -277,7 +277,16 @@ final class ConversionCoordinator: ObservableObject {
             update(jobID: jobID, stage: .packaging, total: 1, currentItem: "封装 M4B")
             appendLog(jobID: jobID, "开始封装 M4B")
             let localOutput = try cacheManager.finalOutputURL(for: job, settings: settings)
-            try await ffmpegRunner.packageM4B(jobID: jobID, intermediateTracks: intermediateTracks, chapters: job.chapters, metadata: job.metadata, encodingSettings: job.encodingSettings, outputURL: localOutput) { [weak self] progress in
+            try await ffmpegRunner.packageM4B(
+                jobID: jobID,
+                intermediateTracks: intermediateTracks,
+                chapters: job.chapters,
+                metadata: job.metadata,
+                encodingSettings: job.encodingSettings,
+                outputURL: localOutput,
+                fragmentedThresholdHours: settings.fragmentedM4BThresholdHours,
+                fragmentedThresholdTracks: settings.fragmentedM4BThresholdTracks
+            ) { [weak self] progress in
                 Task { @MainActor in
                     self?.applyFFmpegProgress(jobID: jobID, progress: progress)
                 }

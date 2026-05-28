@@ -45,6 +45,8 @@ final class FFmpegRunner {
         metadata: BookMetadata,
         encodingSettings: EncodingSettings = .default,
         outputURL: URL,
+        fragmentedThresholdHours: Int = AppSettings.default.fragmentedM4BThresholdHours,
+        fragmentedThresholdTracks: Int = AppSettings.default.fragmentedM4BThresholdTracks,
         progress: @escaping @Sendable (FFmpegProgress) -> Void
     ) async throws {
         let chapters = sources.enumerated().map { index, source in
@@ -57,6 +59,8 @@ final class FFmpegRunner {
             metadata: metadata,
             encodingSettings: encodingSettings,
             outputURL: outputURL,
+            fragmentedThresholdHours: fragmentedThresholdHours,
+            fragmentedThresholdTracks: fragmentedThresholdTracks,
             progress: progress
         )
     }
@@ -96,6 +100,8 @@ final class FFmpegRunner {
         metadata: BookMetadata,
         encodingSettings: EncodingSettings,
         outputURL: URL,
+        fragmentedThresholdHours: Int = AppSettings.default.fragmentedM4BThresholdHours,
+        fragmentedThresholdTracks: Int = AppSettings.default.fragmentedM4BThresholdTracks,
         progress: @escaping @Sendable (FFmpegProgress) -> Void
     ) async throws {
         guard let ffmpeg = bundledFFmpegURL() else {
@@ -122,11 +128,19 @@ final class FFmpegRunner {
             "-i", listURL.path(percentEncoded: false),
             "-i", metadataURL.path(percentEncoded: false)
         ]
-        if let coverURL = try await normalizedCoverURL(
+        let muxingArguments = Self.m4bMuxingArguments(
+            totalDuration: totalDuration,
+            trackCount: intermediateTracks.count,
+            thresholdHours: fragmentedThresholdHours,
+            thresholdTracks: fragmentedThresholdTracks
+        )
+        let usesFragmentedMuxing = !muxingArguments.isEmpty
+        let coverURL = try await normalizedCoverURL(
             jobID: jobID,
             coverURL: metadata.coverURL,
             workDirectory: outputURL.deletingLastPathComponent()
-        ) {
+        )
+        if let coverURL, !usesFragmentedMuxing {
             arguments += [
                 "-i", coverURL.path(percentEncoded: false),
                 "-map", "0:a",
@@ -139,8 +153,7 @@ final class FFmpegRunner {
         } else {
             arguments += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1", "-vn"]
         }
-        let muxingArguments = Self.m4bMuxingArguments(totalDuration: totalDuration, trackCount: intermediateTracks.count)
-        if !muxingArguments.isEmpty {
+        if usesFragmentedMuxing {
             progress(FFmpegProgress(
                 total: 1,
                 currentFile: 0,
@@ -170,6 +183,17 @@ final class FFmpegRunner {
             outputURL.path(percentEncoded: false)
         ]
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: totalDuration, progress: progress)
+        if usesFragmentedMuxing, let coverURL {
+            progress(FFmpegProgress(
+                total: 1,
+                currentFile: 1,
+                speed: "-",
+                eta: "-",
+                currentItem: "写入封面",
+                logLine: "分片 M4B 写入封面元数据"
+            ))
+            try await MP4ArtworkWriter.injectArtwork(coverURL: coverURL, into: outputURL)
+        }
     }
 
     private func normalizedCoverURL(jobID: UUID, coverURL: URL?, workDirectory: URL) async throws -> URL? {
@@ -225,8 +249,18 @@ final class FFmpegRunner {
         ]
     }
 
-    static func m4bMuxingArguments(totalDuration: TimeInterval, trackCount: Int) -> [String] {
-        guard shouldUseFragmentedM4B(totalDuration: totalDuration, trackCount: trackCount) else {
+    static func m4bMuxingArguments(
+        totalDuration: TimeInterval,
+        trackCount: Int,
+        thresholdHours: Int = AppSettings.default.fragmentedM4BThresholdHours,
+        thresholdTracks: Int = AppSettings.default.fragmentedM4BThresholdTracks
+    ) -> [String] {
+        guard shouldUseFragmentedM4B(
+            totalDuration: totalDuration,
+            trackCount: trackCount,
+            thresholdHours: thresholdHours,
+            thresholdTracks: thresholdTracks
+        ) else {
             return []
         }
         return [
@@ -235,8 +269,13 @@ final class FFmpegRunner {
         ]
     }
 
-    static func shouldUseFragmentedM4B(totalDuration: TimeInterval, trackCount: Int) -> Bool {
-        totalDuration >= 72 * 60 * 60 || trackCount >= 500
+    static func shouldUseFragmentedM4B(
+        totalDuration: TimeInterval,
+        trackCount: Int,
+        thresholdHours: Int = AppSettings.default.fragmentedM4BThresholdHours,
+        thresholdTracks: Int = AppSettings.default.fragmentedM4BThresholdTracks
+    ) -> Bool {
+        totalDuration >= TimeInterval(max(thresholdHours, 1)) * 60 * 60 || trackCount >= max(thresholdTracks, 1)
     }
 
     func pause(jobID: UUID) {
@@ -586,5 +625,249 @@ enum FFmpegError: LocalizedError {
                 "FFmpeg 执行失败，退出码 \(status)。"
             }
         }
+    }
+}
+
+enum MP4ArtworkWriter {
+    static func injectArtwork(coverURL: URL, into mediaURL: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try injectArtworkSync(coverURL: coverURL, into: mediaURL)
+        }.value
+    }
+
+    private static func injectArtworkSync(coverURL: URL, into mediaURL: URL) throws {
+        let coverData = try Data(contentsOf: coverURL)
+        let dataType = artworkDataType(for: coverURL)
+        let source = try FileHandle(forReadingFrom: mediaURL)
+        defer { try? source.close() }
+
+        guard let moov = try findTopLevelAtom(type: "moov", in: source) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try source.seek(toOffset: moov.offset + UInt64(moov.headerSize))
+        guard let moovPayload = try source.read(upToCount: Int(moov.size) - moov.headerSize) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        let updatedMoov = atom("moov", updatedMoovPayload(moovPayload, artworkData: coverData, dataType: dataType))
+        let tempURL = mediaURL.deletingLastPathComponent()
+            .appending(path: ".\(mediaURL.lastPathComponent).artwork-\(UUID().uuidString).tmp")
+        FileManager.default.createFile(atPath: tempURL.path(percentEncoded: false), contents: nil)
+        let destination = try FileHandle(forWritingTo: tempURL)
+        defer { try? destination.close() }
+
+        try source.seek(toOffset: 0)
+        try copy(from: source, to: destination, byteCount: moov.offset)
+        try destination.write(contentsOf: updatedMoov)
+        try source.seek(toOffset: moov.offset + moov.size)
+        try copy(from: source, to: destination, byteCount: nil)
+
+        let backupURL = mediaURL.deletingLastPathComponent()
+            .appending(path: ".\(mediaURL.lastPathComponent).artwork-backup-\(UUID().uuidString).tmp")
+        let fileManager = FileManager.default
+        try fileManager.moveItem(at: mediaURL, to: backupURL)
+        do {
+            try fileManager.moveItem(at: tempURL, to: mediaURL)
+            try? fileManager.removeItem(at: backupURL)
+        } catch {
+            try? fileManager.moveItem(at: backupURL, to: mediaURL)
+            throw error
+        }
+    }
+
+    private struct AtomRange {
+        var offset: Int
+        var size: Int
+        var headerSize: Int
+        var type: String
+    }
+
+    private struct TopLevelAtom {
+        var offset: UInt64
+        var size: UInt64
+        var headerSize: Int
+    }
+
+    private static func findTopLevelAtom(type expectedType: String, in file: FileHandle) throws -> TopLevelAtom? {
+        try file.seek(toOffset: 0)
+        var offset: UInt64 = 0
+        while true {
+            try file.seek(toOffset: offset)
+            guard let header = try file.read(upToCount: 16), header.count >= 8 else {
+                return nil
+            }
+            let size32 = readUInt32(header, at: 0)
+            let type = String(decoding: header[4..<8], as: UTF8.self)
+            let size: UInt64
+            let headerSize: Int
+            if size32 == 1 {
+                guard header.count >= 16 else { return nil }
+                size = readUInt64(header, at: 8)
+                headerSize = 16
+            } else {
+                size = UInt64(size32)
+                headerSize = 8
+            }
+            guard size >= UInt64(headerSize) else { return nil }
+            if type == expectedType {
+                return TopLevelAtom(offset: offset, size: size, headerSize: headerSize)
+            }
+            offset += size
+        }
+    }
+
+    private static func updatedMoovPayload(_ payload: Data, artworkData: Data, dataType: UInt32) -> Data {
+        replaceOrAppendChild(in: payload, type: "udta") { udtaPayload in
+            updatedUdtaPayload(udtaPayload, artworkData: artworkData, dataType: dataType)
+        } append: {
+            atom("udta", newMetaAtom(artworkData: artworkData, dataType: dataType))
+        }
+    }
+
+    private static func updatedUdtaPayload(_ payload: Data, artworkData: Data, dataType: UInt32) -> Data {
+        replaceOrAppendChild(in: payload, type: "meta") { metaPayload in
+            updatedMetaPayload(metaPayload, artworkData: artworkData, dataType: dataType)
+        } append: {
+            newMetaAtom(artworkData: artworkData, dataType: dataType)
+        }
+    }
+
+    private static func updatedMetaPayload(_ payload: Data, artworkData: Data, dataType: UInt32) -> Data {
+        guard payload.count >= 4 else {
+            return newMetaAtom(artworkData: artworkData, dataType: dataType).dropAtomHeader()
+        }
+        let prefix = payload.prefix(4)
+        let body = Data(payload.dropFirst(4))
+        let updatedBody = replaceOrAppendChild(in: body, type: "ilst") { ilstPayload in
+            updatedIlstPayload(ilstPayload, artworkData: artworkData, dataType: dataType)
+        } append: {
+            atom("ilst", covrAtom(artworkData: artworkData, dataType: dataType))
+        }
+        return prefix + updatedBody
+    }
+
+    private static func updatedIlstPayload(_ payload: Data, artworkData: Data, dataType: UInt32) -> Data {
+        var result = Data()
+        for child in childAtoms(in: payload) where child.type != "covr" {
+            result += payload[child.offset..<(child.offset + child.size)]
+        }
+        result += covrAtom(artworkData: artworkData, dataType: dataType)
+        return result
+    }
+
+    private static func replaceOrAppendChild(
+        in payload: Data,
+        type: String,
+        update: (Data) -> Data,
+        append: () -> Data
+    ) -> Data {
+        for child in childAtoms(in: payload) where child.type == type {
+            var result = Data()
+            result += payload[..<child.offset]
+            let childPayload = Data(payload[(child.offset + child.headerSize)..<(child.offset + child.size)])
+            result += atom(type, update(childPayload))
+            result += payload[(child.offset + child.size)...]
+            return result
+        }
+        var result = payload
+        result += append()
+        return result
+    }
+
+    private static func childAtoms(in data: Data) -> [AtomRange] {
+        var atoms: [AtomRange] = []
+        var offset = 0
+        while offset + 8 <= data.count {
+            let size32 = readUInt32(data, at: offset)
+            let headerSize = size32 == 1 ? 16 : 8
+            guard offset + headerSize <= data.count else { break }
+            let size = size32 == 1 ? Int(readUInt64(data, at: offset + 8)) : Int(size32)
+            guard size >= headerSize, offset + size <= data.count else { break }
+            let type = String(decoding: data[(offset + 4)..<(offset + 8)], as: UTF8.self)
+            atoms.append(AtomRange(offset: offset, size: size, headerSize: headerSize, type: type))
+            offset += size
+        }
+        return atoms
+    }
+
+    private static func newMetaAtom(artworkData: Data, dataType: UInt32) -> Data {
+        var payload = Data()
+        payload.appendUInt32(0)
+        payload += hdlrAtom()
+        payload += atom("ilst", covrAtom(artworkData: artworkData, dataType: dataType))
+        return atom("meta", payload)
+    }
+
+    private static func hdlrAtom() -> Data {
+        var payload = Data()
+        payload.appendUInt32(0)
+        payload.appendUInt32(0)
+        payload += Data("mdir".utf8)
+        payload += Data(repeating: 0, count: 12)
+        payload.append(0)
+        return atom("hdlr", payload)
+    }
+
+    private static func covrAtom(artworkData: Data, dataType: UInt32) -> Data {
+        var dataPayload = Data()
+        dataPayload.appendUInt32(dataType)
+        dataPayload.appendUInt32(0)
+        dataPayload += artworkData
+        return atom("covr", atom("data", dataPayload))
+    }
+
+    private static func atom(_ type: String, _ payload: Data) -> Data {
+        var result = Data()
+        result.appendUInt32(UInt32(payload.count + 8))
+        result += Data(type.utf8.prefix(4))
+        result += payload
+        return result
+    }
+
+    private static func artworkDataType(for coverURL: URL) -> UInt32 {
+        coverURL.pathExtension.lowercased() == "png" ? 14 : 13
+    }
+
+    private static func copy(from source: FileHandle, to destination: FileHandle, byteCount: UInt64?) throws {
+        var remaining = byteCount
+        while remaining == nil || remaining! > 0 {
+            let requestSize = remaining.map { Int(min($0, 1_048_576)) } ?? 1_048_576
+            guard let chunk = try source.read(upToCount: requestSize), !chunk.isEmpty else {
+                break
+            }
+            try destination.write(contentsOf: chunk)
+            if let value = remaining {
+                remaining = value - UInt64(chunk.count)
+            }
+        }
+    }
+
+    private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
+        UInt32(data[offset]) << 24 |
+        UInt32(data[offset + 1]) << 16 |
+        UInt32(data[offset + 2]) << 8 |
+        UInt32(data[offset + 3])
+    }
+
+    private static func readUInt64(_ data: Data, at offset: Int) -> UInt64 {
+        var value: UInt64 = 0
+        for index in offset..<(offset + 8) {
+            value = (value << 8) | UInt64(data[index])
+        }
+        return value
+    }
+}
+
+private extension Data {
+    mutating func appendUInt32(_ value: UInt32) {
+        append(UInt8((value >> 24) & 0xff))
+        append(UInt8((value >> 16) & 0xff))
+        append(UInt8((value >> 8) & 0xff))
+        append(UInt8(value & 0xff))
+    }
+
+    func dropAtomHeader() -> Data {
+        guard count >= 8 else { return Data() }
+        return Data(dropFirst(8))
     }
 }
