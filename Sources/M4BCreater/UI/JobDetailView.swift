@@ -15,6 +15,7 @@ struct JobDetailView: View {
                 progressPanel
                 metadataPanel
                 encodingPanel
+                volumeSplitPanel
                 chaptersPanel
                 pathPanel
                 cachePanel
@@ -115,6 +116,12 @@ struct JobDetailView: View {
         }
     }
 
+    private var volumeSplitPanel: some View {
+        Panel(title: "分卷", icon: "square.stack.3d.up") {
+            VolumeSplitEditor(job: job)
+        }
+    }
+
     private var chaptersPanel: some View {
         Panel(title: "章节", icon: "list.number") {
             ChapterEditor(job: job)
@@ -126,9 +133,21 @@ struct JobDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 PathRow(title: "输入", kind: job.input.kind.label, value: job.input.displayPath)
                 PathRow(title: "输出", kind: job.output.kind.label, value: job.output.displayPath)
-                PathRow(title: "文件名", kind: "M4B", value: job.outputFileName)
+                PathRow(title: "文件名", kind: "M4B", value: outputFileNamePreview)
             }
         }
+    }
+
+    private var outputFileNamePreview: String {
+        let names = ConversionCoordinator.outputFileNames(
+            baseFileName: job.outputFileName,
+            chapterCount: job.chapters.count,
+            splitSettings: job.volumeSplitSettings
+        )
+        if names.count <= 1 {
+            return job.outputFileName
+        }
+        return "\(names.first ?? job.outputFileName) … \(names.last ?? job.outputFileName)"
     }
 
     private var cachePanel: some View {
@@ -403,6 +422,71 @@ private struct EncodingEditor: View {
             guard job.isEditable else { return }
             coordinator.updateEncodingSettings(jobID: job.id, settings: settings)
         }
+    }
+}
+
+@MainActor
+private struct VolumeSplitEditor: View {
+    @EnvironmentObject private var coordinator: ConversionCoordinator
+    var job: ConversionJob
+    @State private var settings: VolumeSplitSettings = .default
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Toggle("分卷输出", isOn: Binding(
+                    get: { settings.isEnabled },
+                    set: {
+                        settings.tracksPerVolume = $0 ? VolumeSplitSettings.defaultTracksPerVolume : 0
+                    }
+                ))
+                Spacer()
+                if !job.isEditable {
+                    Label("已锁定", systemImage: "lock")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                Label("每卷音轨数", systemImage: "music.note.list")
+                Spacer()
+                Stepper(
+                    "\(max(settings.tracksPerVolume, VolumeSplitSettings.defaultTracksPerVolume)) 条/卷",
+                    value: Binding(
+                        get: { max(settings.tracksPerVolume, VolumeSplitSettings.defaultTracksPerVolume) },
+                        set: { settings.tracksPerVolume = max($0, 1) }
+                    ),
+                    in: 1...1000
+                )
+                .frame(width: 160)
+                .disabled(!settings.isEnabled || !job.isEditable)
+            }
+
+            Text(previewText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(!job.isEditable)
+        .onAppear {
+            settings = job.volumeSplitSettings
+        }
+        .onChange(of: job.id) {
+            settings = job.volumeSplitSettings
+        }
+        .onChange(of: settings) {
+            guard job.isEditable else { return }
+            coordinator.updateVolumeSplitSettings(jobID: job.id, settings: settings)
+        }
+    }
+
+    private var previewText: String {
+        guard settings.isEnabled else { return "当前任务会输出单个 M4B。" }
+        let count = ConversionCoordinator.outputFileNames(
+            baseFileName: job.outputFileName,
+            chapterCount: job.chapters.count,
+            splitSettings: settings
+        ).count
+        return "当前章节数 \(job.chapters.count)，预计输出 \(count) 卷。"
     }
 }
 

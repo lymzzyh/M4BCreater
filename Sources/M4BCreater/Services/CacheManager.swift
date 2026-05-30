@@ -51,7 +51,11 @@ final class CacheManager {
     }
 
     func finalOutputURL(for job: ConversionJob, settings: AppSettings) throws -> URL {
-        try workDirectory(for: job, settings: settings).appending(path: job.outputFileName)
+        try finalOutputURL(for: job, fileName: job.outputFileName, settings: settings)
+    }
+
+    func finalOutputURL(for job: ConversionJob, fileName: String, settings: AppSettings) throws -> URL {
+        try workDirectory(for: job, settings: settings).appending(path: fileName)
     }
 
     func localURLForCachedRemote(_ remoteURL: URL, job: ConversionJob, settings: AppSettings) throws -> URL {

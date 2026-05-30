@@ -210,6 +210,21 @@ struct EncodingSettings: Codable, Hashable {
     }
 }
 
+struct VolumeSplitSettings: Codable, Hashable {
+    var tracksPerVolume: Int = 0
+
+    static let `default` = VolumeSplitSettings()
+    static let defaultTracksPerVolume = 100
+
+    var isEnabled: Bool {
+        tracksPerVolume > 0
+    }
+
+    var label: String {
+        isEnabled ? "每卷 \(tracksPerVolume) 条音轨" : "不分卷"
+    }
+}
+
 struct Chapter: Codable, Hashable, Identifiable {
     var id: UUID = UUID()
     var title: String
@@ -289,6 +304,7 @@ struct ConversionJob: Codable, Identifiable, Hashable {
     var progress: ConversionProgress = ConversionProgress()
     var cacheEntries: [CacheEntry] = []
     var encodingSettings: EncodingSettings = .default
+    var volumeSplitSettings: VolumeSplitSettings = .default
     var hasStarted: Bool = false
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
@@ -307,6 +323,7 @@ struct ConversionJob: Codable, Identifiable, Hashable {
         progress: ConversionProgress = ConversionProgress(),
         cacheEntries: [CacheEntry] = [],
         encodingSettings: EncodingSettings = .default,
+        volumeSplitSettings: VolumeSplitSettings = .default,
         hasStarted: Bool = false,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
@@ -324,6 +341,7 @@ struct ConversionJob: Codable, Identifiable, Hashable {
         self.progress = progress
         self.cacheEntries = cacheEntries
         self.encodingSettings = encodingSettings
+        self.volumeSplitSettings = volumeSplitSettings
         self.hasStarted = hasStarted
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -351,6 +369,7 @@ struct ConversionJob: Codable, Identifiable, Hashable {
         case progress
         case cacheEntries
         case encodingSettings
+        case volumeSplitSettings
         case hasStarted
         case createdAt
         case updatedAt
@@ -371,6 +390,7 @@ struct ConversionJob: Codable, Identifiable, Hashable {
         progress = try container.decodeIfPresent(ConversionProgress.self, forKey: .progress) ?? ConversionProgress()
         cacheEntries = try container.decodeIfPresent([CacheEntry].self, forKey: .cacheEntries) ?? []
         encodingSettings = try container.decodeIfPresent(EncodingSettings.self, forKey: .encodingSettings) ?? .default
+        volumeSplitSettings = try container.decodeIfPresent(VolumeSplitSettings.self, forKey: .volumeSplitSettings) ?? .default
         hasStarted = try container.decodeIfPresent(Bool.self, forKey: .hasStarted) ?? (state != .queued)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()

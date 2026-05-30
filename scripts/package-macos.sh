@@ -87,9 +87,11 @@ PLIST
 
 cp -R "${APP_PATH}" "${DMG_ROOT}/${APP_NAME}.app"
 ln -s /Applications "${DMG_ROOT}/Applications"
+DMG_SIZE_MB="$(du -sk "${DMG_ROOT}" | awk '{ print int($1 / 1024) + 512 }')"
 hdiutil create \
   -volname "${APP_NAME}" \
   -srcfolder "${DMG_ROOT}" \
+  -size "${DMG_SIZE_MB}m" \
   -ov \
   -format UDZO \
   "${DMG_PATH}"

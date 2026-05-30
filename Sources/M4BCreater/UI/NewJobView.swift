@@ -12,9 +12,10 @@ struct NewJobView: View {
     @State private var useWebDAVOutput = false
     @State private var browserPurpose: WebDAVBrowserPurpose?
     @State private var encodingSettings: EncodingSettings = .default
+    @State private var volumeSplitSettings: VolumeSplitSettings = .default
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("新建转换任务")
                 .font(.title2.weight(.semibold))
 
@@ -63,6 +64,31 @@ struct NewJobView: View {
                 }
             }
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("分卷输出", isOn: Binding(
+                    get: { volumeSplitSettings.isEnabled },
+                    set: {
+                        volumeSplitSettings.tracksPerVolume = $0 ? VolumeSplitSettings.defaultTracksPerVolume : 0
+                    }
+                ))
+                HStack {
+                    Label("每卷音轨数", systemImage: "square.stack.3d.up")
+                    Spacer()
+                    Stepper(
+                        "\(max(volumeSplitSettings.tracksPerVolume, VolumeSplitSettings.defaultTracksPerVolume)) 条/卷",
+                        value: Binding(
+                            get: { max(volumeSplitSettings.tracksPerVolume, VolumeSplitSettings.defaultTracksPerVolume) },
+                            set: { volumeSplitSettings.tracksPerVolume = max($0, 1) }
+                        ),
+                        in: 1...1000
+                    )
+                    .frame(width: 160)
+                    .disabled(!volumeSplitSettings.isEnabled)
+                }
+            }
+
             Spacer()
 
             HStack {
@@ -79,7 +105,7 @@ struct NewJobView: View {
             }
         }
         .padding(24)
-        .frame(width: 680, height: 430)
+        .frame(width: 680, height: 520)
         .sheet(item: $browserPurpose) { purpose in
             WebDAVBrowserView(title: purpose.title) { location in
                 switch purpose {
@@ -102,9 +128,19 @@ struct NewJobView: View {
     private func create() {
         guard let input = selectedInputLocation, let output = selectedOutputLocation else { return }
         if input.kind == .local, output.kind == .local {
-            coordinator.createLocalJob(inputURL: input.url, outputURL: output.url, encodingSettings: encodingSettings)
+            coordinator.createLocalJob(
+                inputURL: input.url,
+                outputURL: output.url,
+                encodingSettings: encodingSettings,
+                volumeSplitSettings: volumeSplitSettings
+            )
         } else {
-            coordinator.createJob(input: input, output: output, encodingSettings: encodingSettings)
+            coordinator.createJob(
+                input: input,
+                output: output,
+                encodingSettings: encodingSettings,
+                volumeSplitSettings: volumeSplitSettings
+            )
         }
     }
 

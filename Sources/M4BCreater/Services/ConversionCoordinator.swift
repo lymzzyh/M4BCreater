@@ -44,7 +44,12 @@ final class ConversionCoordinator: ObservableObject {
         }
     }
 
-    func createLocalJob(inputURL: URL, outputURL: URL, encodingSettings: EncodingSettings = .default) {
+    func createLocalJob(
+        inputURL: URL,
+        outputURL: URL,
+        encodingSettings: EncodingSettings = .default,
+        volumeSplitSettings: VolumeSplitSettings = .default
+    ) {
         Task {
             let inspection = await metadataService.inspectLocalFolder(inputURL)
             let title = inspection.metadata.title.isEmpty ? inputURL.lastPathComponent : inspection.metadata.title
@@ -57,6 +62,7 @@ final class ConversionCoordinator: ObservableObject {
                 metadata: inspection.metadata,
                 chapters: inspection.chapters,
                 encodingSettings: encodingSettings,
+                volumeSplitSettings: volumeSplitSettings,
                 outputFileName: "\(Self.safeFileName(title)).m4b",
                 errorMessage: inspection.warnings.joined(separator: "\n").nilIfEmpty
             )
@@ -73,7 +79,12 @@ final class ConversionCoordinator: ObservableObject {
         createJob(input: input, output: output)
     }
 
-    func createJob(input: StorageLocation, output: StorageLocation, encodingSettings: EncodingSettings = .default) {
+    func createJob(
+        input: StorageLocation,
+        output: StorageLocation,
+        encodingSettings: EncodingSettings = .default,
+        volumeSplitSettings: VolumeSplitSettings = .default
+    ) {
         Task {
             let jobID = UUID()
             let title = input.displayName.isEmpty ? "有声书任务" : input.displayName
@@ -86,6 +97,7 @@ final class ConversionCoordinator: ObservableObject {
                 metadata: scan.metadata,
                 chapters: scan.chapters,
                 encodingSettings: encodingSettings,
+                volumeSplitSettings: volumeSplitSettings,
                 outputFileName: "\(Self.safeFileName(scan.metadata.title.isEmpty ? title : scan.metadata.title)).m4b",
                 errorMessage: scan.errorMessage
             )
@@ -183,6 +195,14 @@ final class ConversionCoordinator: ObservableObject {
         persist()
     }
 
+    func updateVolumeSplitSettings(jobID: UUID, settings: VolumeSplitSettings) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].isEditable else { return }
+        jobs[index].volumeSplitSettings = settings
+        jobs[index].updatedAt = Date()
+        persist()
+    }
+
     func updateChapters(jobID: UUID, chapters: [Chapter]) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         guard jobs[index].isEditable else { return }
@@ -251,8 +271,17 @@ final class ConversionCoordinator: ObservableObject {
 
     func revealOutput(for job: ConversionJob) {
         guard job.output.kind == .local else { return }
-        let output = job.output.url.appending(path: job.outputFileName)
-        NSWorkspace.shared.activateFileViewerSelecting([output])
+        let fileNames = Self.outputFileNames(
+            baseFileName: job.outputFileName,
+            chapterCount: job.chapters.count,
+            splitSettings: job.volumeSplitSettings
+        )
+        if fileNames.count == 1 {
+            let output = job.output.url.appending(path: job.outputFileName)
+            NSWorkspace.shared.activateFileViewerSelecting([output])
+        } else {
+            NSWorkspace.shared.open(job.output.url)
+        }
     }
 
     private func run(jobID: UUID) async {
@@ -274,27 +303,42 @@ final class ConversionCoordinator: ObservableObject {
             appendLog(jobID: jobID, "开始转码流水线")
             let intermediateTracks = try await transcodePipeline(for: job)
 
-            update(jobID: jobID, stage: .packaging, total: 1, currentItem: "封装 M4B")
-            appendLog(jobID: jobID, "开始封装 M4B")
-            let localOutput = try cacheManager.finalOutputURL(for: job, settings: settings)
-            try await ffmpegRunner.packageM4B(
-                jobID: jobID,
+            let volumePlans = Self.volumePlans(
+                baseFileName: job.outputFileName,
+                chapters: normalizedChapters(job.chapters),
                 intermediateTracks: intermediateTracks,
-                chapters: job.chapters,
-                metadata: job.metadata,
-                encodingSettings: job.encodingSettings,
-                outputURL: localOutput,
-                fragmentedThresholdHours: settings.fragmentedM4BThresholdHours,
-                fragmentedThresholdTracks: settings.fragmentedM4BThresholdTracks
-            ) { [weak self] progress in
-                Task { @MainActor in
-                    self?.applyFFmpegProgress(jobID: jobID, progress: progress)
+                splitSettings: job.volumeSplitSettings
+            )
+            update(jobID: jobID, stage: .packaging, total: 1, currentItem: volumePlans.count > 1 ? "封装 \(volumePlans.count) 卷 M4B" : "封装 M4B")
+            appendLog(jobID: jobID, volumePlans.count > 1 ? "开始分卷封装：\(volumePlans.count) 卷" : "开始封装 M4B")
+            var packagedOutputs: [(url: URL, fileName: String)] = []
+            for plan in volumePlans {
+                guard currentState(jobID: jobID) == .running else { throw ConversionError.interrupted }
+                update(jobID: jobID, stage: .packaging, total: 1, currentItem: plan.label)
+                appendLog(jobID: jobID, "开始封装 \(plan.label)：\(plan.outputFileName)")
+                let localOutput = try cacheManager.finalOutputURL(for: job, fileName: plan.outputFileName, settings: settings)
+                try await ffmpegRunner.packageM4B(
+                    jobID: jobID,
+                    intermediateTracks: plan.intermediateTracks,
+                    chapters: plan.chapters,
+                    metadata: Self.metadataForVolume(job.metadata, plan: plan, volumeCount: volumePlans.count),
+                    encodingSettings: job.encodingSettings,
+                    outputURL: localOutput,
+                    fragmentedThresholdHours: settings.fragmentedM4BThresholdHours,
+                    fragmentedThresholdTracks: settings.fragmentedM4BThresholdTracks
+                ) { [weak self] progress in
+                    Task { @MainActor in
+                        self?.applyFFmpegProgress(jobID: jobID, progress: progress)
+                    }
                 }
+                packagedOutputs.append((localOutput, plan.outputFileName))
             }
 
             update(jobID: jobID, stage: .writingOutput, total: 1, currentItem: "写入输出目录")
             appendLog(jobID: jobID, "写入输出：\(job.output.displayPath)")
-            try await writeOutput(localOutput: localOutput, job: job)
+            for output in packagedOutputs {
+                try await writeOutput(localOutput: output.url, fileName: output.fileName, job: job)
+            }
 
             guard let completedIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             jobs[completedIndex].state = .completed
@@ -304,7 +348,7 @@ final class ConversionCoordinator: ObservableObject {
             jobs[completedIndex].progress.currentItem = "完成"
             jobs[completedIndex].updatedAt = Date()
             cacheManager.cleanCompletedCache(for: jobs[completedIndex], settings: settings)
-            appendLog(jobID: jobID, "任务完成：\(jobs[completedIndex].outputFileName)")
+            appendLog(jobID: jobID, packagedOutputs.count > 1 ? "任务完成：输出 \(packagedOutputs.count) 卷" : "任务完成：\(jobs[completedIndex].outputFileName)")
             persist()
         } catch {
             setFailure(jobID: jobID, error: error)
@@ -460,19 +504,19 @@ final class ConversionCoordinator: ObservableObject {
         return localURL
     }
 
-    private func writeOutput(localOutput: URL, job: ConversionJob) async throws {
-        let destination = job.output.url.appending(path: job.outputFileName)
+    private func writeOutput(localOutput: URL, fileName: String, job: ConversionJob) async throws {
+        let destination = job.output.url.appending(path: fileName)
         switch job.output.kind {
         case .local:
             try await localProvider.upload(from: localOutput, to: destination) { [weak self] progress in
                 Task { @MainActor in
-                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "写入本地")
+                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "写入本地 \(fileName)")
                 }
             }
         case .webDAV:
             try await webDAVProvider.upload(from: localOutput, to: destination, credentialID: job.output.credentialID) { [weak self] progress in
                 Task { @MainActor in
-                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "上传 WebDAV")
+                    self?.update(jobID: job.id, stage: .writingOutput, total: 1, currentItem: "上传 WebDAV \(fileName)")
                 }
             }
         }
@@ -687,6 +731,80 @@ final class ConversionCoordinator: ObservableObject {
 
     private static func errorMessage(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    static func outputFileNames(
+        baseFileName: String,
+        chapterCount: Int,
+        splitSettings: VolumeSplitSettings
+    ) -> [String] {
+        let volumeCount = volumeCount(chapterCount: chapterCount, splitSettings: splitSettings)
+        guard volumeCount > 1 else { return [baseFileName] }
+        let baseURL = URL(filePath: baseFileName)
+        let stem = baseURL.deletingPathExtension().lastPathComponent
+        let ext = baseURL.pathExtension.isEmpty ? "m4b" : baseURL.pathExtension
+        let digits = max(2, String(volumeCount).count)
+        return (1...volumeCount).map { index in
+            "\(stem) - Vol. \(String(format: "%0*d", digits, index)).\(ext)"
+        }
+    }
+
+    private struct VolumePlan {
+        var index: Int
+        var volumeCount: Int
+        var outputFileName: String
+        var chapters: [Chapter]
+        var intermediateTracks: [URL]
+
+        var label: String {
+            volumeCount > 1 ? "第 \(index + 1)/\(volumeCount) 卷" : "M4B"
+        }
+    }
+
+    private static func volumePlans(
+        baseFileName: String,
+        chapters: [Chapter],
+        intermediateTracks: [URL],
+        splitSettings: VolumeSplitSettings
+    ) -> [VolumePlan] {
+        let fileNames = outputFileNames(baseFileName: baseFileName, chapterCount: chapters.count, splitSettings: splitSettings)
+        let tracksPerVolume = splitSettings.isEnabled ? max(splitSettings.tracksPerVolume, 1) : max(chapters.count, 1)
+        return fileNames.indices.map { index in
+            let start = index * tracksPerVolume
+            let end = min(start + tracksPerVolume, chapters.count)
+            return VolumePlan(
+                index: index,
+                volumeCount: fileNames.count,
+                outputFileName: fileNames[index],
+                chapters: normalizedChaptersForVolume(Array(chapters[start..<end])),
+                intermediateTracks: Array(intermediateTracks[start..<end])
+            )
+        }
+    }
+
+    private static func volumeCount(chapterCount: Int, splitSettings: VolumeSplitSettings) -> Int {
+        guard splitSettings.isEnabled, chapterCount > splitSettings.tracksPerVolume else {
+            return 1
+        }
+        return Int(ceil(Double(chapterCount) / Double(max(splitSettings.tracksPerVolume, 1))))
+    }
+
+    private static func normalizedChaptersForVolume(_ chapters: [Chapter]) -> [Chapter] {
+        chapters.enumerated().map { index, chapter in
+            var copy = chapter
+            copy.order = index
+            return copy
+        }
+    }
+
+    private static func metadataForVolume(_ metadata: BookMetadata, plan: VolumePlan, volumeCount: Int) -> BookMetadata {
+        guard volumeCount > 1 else { return metadata }
+        var copy = metadata
+        let suffix = "Vol. \(String(format: "%0*d", max(2, String(volumeCount).count), plan.index + 1))"
+        copy.title = "\(metadata.title) - \(suffix)"
+        let album = metadata.album.isEmpty ? metadata.title : metadata.album
+        copy.album = "\(album) - \(suffix)"
+        return copy
     }
 
     static func normalizedDirectoryURL(_ url: URL) -> URL {

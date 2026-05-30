@@ -114,8 +114,33 @@ struct StorageAndCacheTests {
 
         #expect(job.encodingSettings.codec == .aac)
         #expect(job.encodingSettings.bitrateKbps == 192)
+        #expect(!job.volumeSplitSettings.isEnabled)
         #expect(job.hasStarted)
         #expect(!job.isEditable)
+    }
+
+    @Test
+    func volumeSplitOutputNamesUseStablePaddedVolumeSuffixes() {
+        let names = ConversionCoordinator.outputFileNames(
+            baseFileName: "斗破苍穹-桑梓.m4b",
+            chapterCount: 1208,
+            splitSettings: VolumeSplitSettings(tracksPerVolume: 100)
+        )
+
+        #expect(names.count == 13)
+        #expect(names.first == "斗破苍穹-桑梓 - Vol. 01.m4b")
+        #expect(names.last == "斗破苍穹-桑梓 - Vol. 13.m4b")
+    }
+
+    @Test
+    func volumeSplitDoesNotRenameSingleVolumeOutputs() {
+        let names = ConversionCoordinator.outputFileNames(
+            baseFileName: "短篇.m4b",
+            chapterCount: 80,
+            splitSettings: VolumeSplitSettings(tracksPerVolume: 100)
+        )
+
+        #expect(names == ["短篇.m4b"])
     }
 
     @Test
