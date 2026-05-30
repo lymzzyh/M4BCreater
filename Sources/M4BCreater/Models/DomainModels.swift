@@ -201,12 +201,41 @@ enum AudioCodec: String, Codable, CaseIterable, Identifiable {
 struct EncodingSettings: Codable, Hashable {
     var codec: AudioCodec = .aac
     var bitrateKbps: Int = 192
+    var playbackSpeed: Double = 1.0
 
     static let availableBitrates = [32, 48, 64, 96, 128, 160, 192, 256, 320]
+    static let availablePlaybackSpeeds = stride(from: 0.5, through: 3.0, by: 0.1).map { (Double(round($0 * 10)) / 10) }
     static let `default` = EncodingSettings()
 
     var bitrateLabel: String {
         "\(bitrateKbps) kbps"
+    }
+
+    var speedLabel: String {
+        String(format: "%.1fx", playbackSpeed)
+    }
+
+    init(codec: AudioCodec = .aac, bitrateKbps: Int = 192, playbackSpeed: Double = 1.0) {
+        self.codec = codec
+        self.bitrateKbps = bitrateKbps
+        self.playbackSpeed = Self.normalizedPlaybackSpeed(playbackSpeed)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case codec
+        case bitrateKbps
+        case playbackSpeed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        codec = try container.decodeIfPresent(AudioCodec.self, forKey: .codec) ?? .aac
+        bitrateKbps = try container.decodeIfPresent(Int.self, forKey: .bitrateKbps) ?? 192
+        playbackSpeed = Self.normalizedPlaybackSpeed(try container.decodeIfPresent(Double.self, forKey: .playbackSpeed) ?? 1.0)
+    }
+
+    private static func normalizedPlaybackSpeed(_ value: Double) -> Double {
+        min(max((value * 10).rounded() / 10, 0.5), 3.0)
     }
 }
 

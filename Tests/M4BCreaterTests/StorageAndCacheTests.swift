@@ -30,9 +30,38 @@ struct StorageAndCacheTests {
         )
 
         #expect(args.contains("320k"))
+        #expect(!args.contains("-filter:a"))
         #expect(args.contains("-progress"))
         #expect(args.contains("pipe:2"))
         #expect(args.contains(runner.audioEncoderName(for: EncodingSettings(codec: .aac, bitrateKbps: 320))))
+    }
+
+    @Test
+    func transcodeArgumentsUseAtempoForPlaybackSpeed() {
+        let runner = FFmpegRunner()
+        let args = runner.ffmpegArgumentsForTranscode(
+            sourceURL: URL(filePath: "/tmp/input.mp3"),
+            outputURL: URL(filePath: "/tmp/output.m4a"),
+            encodingSettings: EncodingSettings(codec: .aac, bitrateKbps: 192, playbackSpeed: 3.0)
+        )
+
+        #expect(args.contains("-filter:a"))
+        #expect(args.contains("atempo=2,atempo=1.5"))
+    }
+
+    @Test
+    func legacyEncodingSettingsDecodingDefaultsPlaybackSpeed() throws {
+        let json = """
+        {
+          "codec": "aac",
+          "bitrateKbps": 128
+        }
+        """
+        let settings = try JSONDecoder.app.decode(EncodingSettings.self, from: Data(json.utf8))
+
+        #expect(settings.codec == .aac)
+        #expect(settings.bitrateKbps == 128)
+        #expect(settings.playbackSpeed == 1.0)
     }
 
     @Test
@@ -114,6 +143,7 @@ struct StorageAndCacheTests {
 
         #expect(job.encodingSettings.codec == .aac)
         #expect(job.encodingSettings.bitrateKbps == 192)
+        #expect(job.encodingSettings.playbackSpeed == 1.0)
         #expect(!job.volumeSplitSettings.isEnabled)
         #expect(job.hasStarted)
         #expect(!job.isEditable)

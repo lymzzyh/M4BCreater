@@ -51,16 +51,26 @@ struct NewJobView: View {
                 }
             }
 
-            HStack(spacing: 16) {
-                Picker("编码", selection: $encodingSettings.codec) {
-                    ForEach(AudioCodec.allCases) { codec in
-                        Text(codec.label).tag(codec)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 16) {
+                    Picker("编码", selection: $encodingSettings.codec) {
+                        ForEach(AudioCodec.allCases) { codec in
+                            Text(codec.label).tag(codec)
+                        }
+                    }
+                    Picker("码率", selection: $encodingSettings.bitrateKbps) {
+                        ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
+                            Text("\(bitrate) kbps").tag(bitrate)
+                        }
                     }
                 }
-                Picker("码率", selection: $encodingSettings.bitrateKbps) {
-                    ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
-                        Text("\(bitrate) kbps").tag(bitrate)
-                    }
+
+                HStack {
+                    Label("输出速度", systemImage: "speedometer")
+                    Slider(value: $encodingSettings.playbackSpeed, in: 0.5...3.0, step: 0.1)
+                    Text(encodingSettings.speedLabel)
+                        .monospacedDigit()
+                        .frame(width: 52, alignment: .trailing)
                 }
             }
 

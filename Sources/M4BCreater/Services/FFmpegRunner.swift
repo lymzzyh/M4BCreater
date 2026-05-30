@@ -76,19 +76,8 @@ final class FFmpegRunner {
             throw FFmpegError.missingBinary
         }
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let arguments = [
-            "-hide_banner",
-            "-nostdin",
-            "-nostats",
-            "-progress", "pipe:2",
-            "-y",
-            "-i", sourceURL.path(percentEncoded: false),
-            "-vn",
-            "-c:a", audioEncoderName(for: encodingSettings),
-            "-b:a", "\(encodingSettings.bitrateKbps)k",
-            outputURL.path(percentEncoded: false)
-        ]
-        let duration = (try? await probeDuration(sourceURL)) ?? 0
+        let arguments = ffmpegArgumentsForTranscode(sourceURL: sourceURL, outputURL: outputURL, encodingSettings: encodingSettings)
+        let duration = ((try? await probeDuration(sourceURL)) ?? 0) / max(encodingSettings.playbackSpeed, 0.1)
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: duration, progress: progress)
         return outputURL
     }
@@ -235,18 +224,41 @@ final class FFmpegRunner {
     }
 
     func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
-        [
+        var arguments = [
             "-hide_banner",
             "-nostdin",
             "-nostats",
             "-progress", "pipe:2",
             "-y",
             "-i", sourceURL.path(percentEncoded: false),
-            "-vn",
+            "-vn"
+        ]
+        if let atempoFilter = Self.atempoFilter(for: encodingSettings.playbackSpeed) {
+            arguments += ["-filter:a", atempoFilter]
+        }
+        arguments += [
             "-c:a", audioEncoderName(for: encodingSettings),
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
+        return arguments
+    }
+
+    static func atempoFilter(for speed: Double) -> String? {
+        var remaining = min(max((speed * 10).rounded() / 10, 0.5), 3.0)
+        guard abs(remaining - 1.0) >= 0.0001 else { return nil }
+        var filters: [Double] = []
+        while remaining > 2.0 {
+            filters.append(2.0)
+            remaining /= 2.0
+        }
+        filters.append(remaining)
+        return filters.map { value in
+            if abs(value.rounded() - value) < 0.0001 {
+                return "\(Int(value.rounded()))"
+            }
+            return String(format: "%.1f", value)
+        }.map { "atempo=\($0)" }.joined(separator: ",")
     }
 
     static func m4bMuxingArguments(

@@ -390,26 +390,36 @@ private struct EncodingEditor: View {
     @State private var settings: EncodingSettings = .default
 
     var body: some View {
-        HStack(spacing: 16) {
-            Picker("编码", selection: $settings.codec) {
-                ForEach(AudioCodec.allCases) { codec in
-                    Text(codec.label).tag(codec)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 16) {
+                Picker("编码", selection: $settings.codec) {
+                    ForEach(AudioCodec.allCases) { codec in
+                        Text(codec.label).tag(codec)
+                    }
                 }
-            }
-            .frame(width: 180)
+                .frame(width: 180)
 
-            Picker("码率", selection: $settings.bitrateKbps) {
-                ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
-                    Text("\(bitrate) kbps").tag(bitrate)
+                Picker("码率", selection: $settings.bitrateKbps) {
+                    ForEach(EncodingSettings.availableBitrates, id: \.self) { bitrate in
+                        Text("\(bitrate) kbps").tag(bitrate)
+                    }
                 }
-            }
-            .frame(width: 180)
+                .frame(width: 180)
 
-            if !job.isEditable {
-                Label("已锁定", systemImage: "lock")
-                    .foregroundStyle(.secondary)
+                if !job.isEditable {
+                    Label("已锁定", systemImage: "lock")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
             }
-            Spacer()
+
+            HStack {
+                Label("输出速度", systemImage: "speedometer")
+                Slider(value: $settings.playbackSpeed, in: 0.5...3.0, step: 0.1)
+                Text(settings.speedLabel)
+                    .monospacedDigit()
+                    .frame(width: 52, alignment: .trailing)
+            }
         }
         .disabled(!job.isEditable)
         .onAppear {
