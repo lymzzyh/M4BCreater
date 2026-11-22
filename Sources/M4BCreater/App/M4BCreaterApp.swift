@@ -7,17 +7,29 @@ struct M4BCreaterApp: App {
     @StateObject private var coordinator = ConversionCoordinator()
 
     var body: some Scene {
+        // Build the view values on the main actor before passing them to SwiftUI's scene builders.
+        let mainContent = ContentView()
+            .environmentObject(coordinator)
+            .frame(minWidth: 1180, minHeight: 760)
+        let settingsContent = SettingsView()
+            .environmentObject(coordinator)
+            .frame(width: 620, height: 420)
+
+        Self.scenes(mainContent: mainContent, settingsContent: settingsContent)
+    }
+
+    @SceneBuilder
+    private nonisolated static func scenes<MainContent: View, SettingsContent: View>(
+        mainContent: MainContent,
+        settingsContent: SettingsContent
+    ) -> some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(coordinator)
-                .frame(minWidth: 1180, minHeight: 760)
+            mainContent
         }
         .windowStyle(.titleBar)
 
         Settings {
-            SettingsView()
-                .environmentObject(coordinator)
-                .frame(width: 620, height: 420)
+            settingsContent
         }
     }
 }
