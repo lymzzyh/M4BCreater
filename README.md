@@ -123,7 +123,13 @@ scripts/package-macos.sh
 - `dist/M4BCreater.app`
 - `dist/M4BCreater.dmg`
 
-当前打包产物是本地未公证版本，适合本机使用和开发测试。如果需要正式分发，建议后续切到 Xcode app target 或调整资源加载路径后，再进行 Developer ID 签名和 notarization。
+默认使用临时签名。要让 macOS 在重新打包后可靠地关联本地网络授权，请使用钥匙串中同一个 Apple 签发的代码签名身份。可运行 `security find-identity -v -p codesigning` 查找签名身份的 SHA-1，然后打包：
+
+```bash
+CODE_SIGN_IDENTITY="<签名身份的 SHA-1>" scripts/package-macos.sh
+```
+
+首次连接局域网 WebDAV 时，在 macOS 提示中允许 M4BCreater 访问本地网络。当前脚本生成未公证的本地包。
 
 ## 内置 FFmpeg
 

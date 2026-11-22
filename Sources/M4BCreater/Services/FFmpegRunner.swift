@@ -548,9 +548,11 @@ final class FFmpegRunner {
     }
 
     private func bundledExecutableURL(named name: String) -> URL? {
+        let resourceBundle = Bundle.main.url(forResource: "M4BCreater_M4BCreater", withExtension: "bundle")
+            .flatMap(Bundle.init(url:)) ?? Bundle.module
         let candidates = [
-            Bundle.module.url(forResource: name, withExtension: nil),
-            Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "FFmpeg"),
+            resourceBundle.url(forResource: name, withExtension: nil),
+            resourceBundle.url(forResource: name, withExtension: nil, subdirectory: "FFmpeg"),
             Bundle.main.url(forResource: name, withExtension: nil),
             Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "FFmpeg"),
             Bundle.main.resourceURL?.appending(path: name),
