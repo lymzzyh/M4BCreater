@@ -92,6 +92,23 @@ struct StorageAndCacheTests {
         #expect(!runner.hasActiveProcess(jobID: jobID))
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func webDAVDownloadTimesOutWithoutNetworkProgress() async throws {
+        let target = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let operation = WebDAVDownloadOperation(localURL: target, requestTimeout: 0.25, progressInterval: 0.5) { _ in }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 60
+        configuration.protocolClasses = [StallingDownloadProtocol.self]
+        let request = URLRequest(url: try #require(URL(string: "https://webdav-test.invalid/audio.m4a")))
+
+        let start = ContinuousClock.now
+        await #expect(throws: URLError(.timedOut)) {
+            try await operation.start(request: request, configuration: configuration)
+        }
+        #expect(start.duration(to: .now) < .seconds(5))
+        #expect(!FileManager.default.fileExists(atPath: target.path(percentEncoded: false)))
+    }
+
     @Test
     func transcodeArgumentsUseSelectedHighBitrate() {
         let runner = FFmpegRunner()
@@ -389,6 +406,13 @@ struct StorageAndCacheTests {
             try manager.ensureCapacity(settings: settings, additionalBytes: 11)
         }
     }
+}
+
+private final class StallingDownloadProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {}
+    override func stopLoading() {}
 }
 
 private func testAtom(_ type: String, _ payload: Data) -> Data {

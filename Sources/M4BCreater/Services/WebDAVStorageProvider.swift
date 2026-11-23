@@ -171,7 +171,7 @@ final class WebDAVStorageProvider: NSObject, StorageProvider {
     }
 }
 
-private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let localURL: URL
     private let requestTimeout: TimeInterval
     private let progressInterval: TimeInterval
@@ -180,7 +180,9 @@ private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegat
 
     private var session: URLSession?
     private var continuation: CheckedContinuation<Void, Error>?
-    private var finishedResult: Result<Void, Error>?
+    private var stallTimer: DispatchSourceTimer?
+    private var stallDeadline = DispatchTime.now()
+    private var didStall = false
     private var startDate = Date()
     private var lastProgressDate = Date.distantPast
     private var lastProgressBytes: Int64 = 0
@@ -199,36 +201,69 @@ private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegat
         self.progress = progress
     }
 
-    func start(request: URLRequest) async throws {
+    func start(request: URLRequest, configuration: URLSessionConfiguration? = nil) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                lock.withLock {
+                let session = URLSession(configuration: configuration ?? downloadConfiguration(), delegate: self, delegateQueue: nil)
+                let task = session.downloadTask(with: request)
+                let shouldStart = lock.withLock {
+                    guard !Task.isCancelled else { return false }
                     self.continuation = continuation
-                    self.startDate = Date()
-                    self.lastProgressDate = self.startDate
-                    self.lastProgressBytes = 0
-                    self.lastObservedBytes = 0
-                    self.expectedBytes = nil
-                }
-
-                let configuration = URLSessionConfiguration.default
-                configuration.timeoutIntervalForRequest = requestTimeout
-                configuration.timeoutIntervalForResource = max(requestTimeout * 4, 3600)
-                configuration.waitsForConnectivity = true
-                configuration.allowsConstrainedNetworkAccess = true
-                configuration.httpMaximumConnectionsPerHost = 6
-
-                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-                lock.withLock {
                     self.session = session
+                    startDate = Date()
+                    lastProgressDate = startDate
+                    stallDeadline = .now() + requestTimeout
+                    let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+                    timer.setEventHandler { [weak self, weak task] in
+                        guard let self, let task else { return }
+                        cancelIfStalled(task)
+                    }
+                    stallTimer = timer
+                    timer.schedule(deadline: stallDeadline)
+                    timer.activate()
+                    return true
                 }
-                session.downloadTask(with: request).resume()
+                if shouldStart {
+                    task.resume()
+                } else {
+                    session.invalidateAndCancel()
+                    continuation.resume(throwing: CancellationError())
+                }
             }
         } onCancel: {
-            lock.withLock {
-                session?.invalidateAndCancel()
-            }
+            let activeSession = lock.withLock { session }
+            activeSession?.invalidateAndCancel()
         }
+    }
+
+    private func downloadConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = max(requestTimeout * 4, 3600)
+        configuration.waitsForConnectivity = true
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.httpMaximumConnectionsPerHost = 6
+        return configuration
+    }
+
+    private func cancelIfStalled(_ task: URLSessionDownloadTask) {
+        let shouldCancel = lock.withLock {
+            guard let stallTimer else { return false }
+            if DispatchTime.now() < stallDeadline {
+                stallTimer.schedule(deadline: stallDeadline)
+                return false
+            }
+            didStall = true
+            stopStallTimer()
+            return true
+        }
+        if shouldCancel { task.cancel() }
+    }
+
+    // The caller holds the lock.
+    private func stopStallTimer() {
+        stallTimer?.cancel()
+        stallTimer = nil
     }
 
     nonisolated func urlSession(
@@ -243,6 +278,9 @@ private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegat
         var transfer: TransferProgress?
 
         lock.withLock {
+            if totalBytesWritten > lastObservedBytes {
+                stallDeadline = .now() + requestTimeout
+            }
             lastObservedBytes = totalBytesWritten
             expectedBytes = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
             shouldEmit = now.timeIntervalSince(lastProgressDate) >= progressInterval
@@ -269,6 +307,7 @@ private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegat
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
+        lock.withLock { stopStallTimer() }
         guard let http = downloadTask.response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             finish(.failure(StorageError.invalidResponse))
             return
@@ -292,35 +331,23 @@ private final class WebDAVDownloadOperation: NSObject, URLSessionDownloadDelegat
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error {
-            finish(.failure(error))
+            let timedOut = lock.withLock { didStall }
+            finish(.failure(timedOut ? URLError(.timedOut) : error))
         } else {
             finish(.success(()))
         }
     }
 
     private func finish(_ result: Result<Void, Error>) {
-        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
-            guard self.continuation != nil else {
-                return nil
-            }
-            if finishedResult != nil {
-                return nil
-            }
-            finishedResult = result
-            let continuation = self.continuation
+        let (continuation, finishedSession) = lock.withLock {
+            let resources = (continuation, session)
             self.continuation = nil
-            session?.finishTasksAndInvalidate()
             session = nil
-            return continuation
+            stopStallTimer()
+            return resources
         }
-
-        guard let continuation else { return }
-        switch result {
-        case .success:
-            continuation.resume()
-        case .failure(let error):
-            continuation.resume(throwing: error)
-        }
+        finishedSession?.finishTasksAndInvalidate()
+        continuation?.resume(with: result)
     }
 
     private func finalSpeed(bytes: Int64) -> Double {
