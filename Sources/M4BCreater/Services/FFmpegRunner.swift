@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-struct FFmpegProgress: Hashable {
+struct FFmpegProgress: Hashable, Sendable {
     var total: Double
     var currentFile: Double
     var speed: String
@@ -308,7 +308,7 @@ final class FFmpegRunner {
         processByJobID[jobID]?.terminate()
     }
 
-    private func run(
+    func run(
         jobID: UUID,
         executable: URL,
         arguments: [String],
@@ -323,51 +323,96 @@ final class FFmpegRunner {
         process.standardOutput = pipe
         processByJobID[jobID] = process
         defer { processByJobID[jobID] = nil }
-        let recentOutput = RecentFFmpegLines(limit: 18)
 
-        let reader = Task {
-            var current = FFmpegProgress(total: 0, currentFile: 0, speed: "-", eta: "-", currentItem: "FFmpeg", logLine: "FFmpeg 已启动")
-            progress(current)
-            for try await line in pipe.fileHandleForReading.bytes.lines {
-                recentOutput.append(line)
-                current = Self.parse(line: line, duration: progressDuration, current: current)
-                if Self.isProgressFlush(line) {
-                    progress(current)
-                }
-            }
-        }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let completion = ProcessCompletion(continuation: continuation)
+        async let recentOutput = Self.readOutput(
+            from: pipe.fileHandleForReading,
+            duration: progressDuration,
+            progress: progress
+        )
+        let status: Int32 = try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { completed in
-                reader.cancel()
-                try? pipe.fileHandleForReading.close()
-                let status = completed.terminationStatus
-                progress(FFmpegProgress(
-                    total: 0,
-                    currentFile: status == 0 ? 1 : 0,
-                    speed: "-",
-                    eta: "-",
-                    currentItem: "FFmpeg",
-                    logLine: "FFmpeg 退出，状态码 \(status)"
-                ))
-                if status == 0 {
-                    completion.resume(.success(()))
-                } else {
-                    completion.resume(.failure(FFmpegError.failed(status: status, detail: recentOutput.tail())))
-                }
+                continuation.resume(returning: completed.terminationStatus)
             }
             do {
                 try process.run()
             } catch {
-                reader.cancel()
-                try? pipe.fileHandleForReading.close()
-                completion.resume(.failure(error))
+                try? pipe.fileHandleForWriting.close()
+                continuation.resume(throwing: error)
+            }
+        }
+        let detail = try await recentOutput
+        progress(FFmpegProgress(
+            total: 0,
+            currentFile: status == 0 ? 1 : 0,
+            speed: "-",
+            eta: "-",
+            currentItem: "FFmpeg",
+            logLine: "FFmpeg 退出，状态码 \(status)"
+        ))
+        if status != 0 {
+            throw FFmpegError.failed(status: status, detail: detail)
+        }
+    }
+
+    private nonisolated static func readOutput(
+        from handle: FileHandle,
+        duration: TimeInterval,
+        progress: @escaping @Sendable (FFmpegProgress) -> Void
+    ) async throws -> String? {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result {
+                    try drainOutput(from: handle, duration: duration, progress: progress)
+                })
             }
         }
     }
 
-    private static func parse(line: String, duration: TimeInterval, current: FFmpegProgress) -> FFmpegProgress {
+    private nonisolated static func drainOutput(
+        from handle: FileHandle,
+        duration: TimeInterval,
+        progress: @Sendable (FFmpegProgress) -> Void
+    ) throws -> String? {
+        // The reader owns the handle and drains buffered output after process exit.
+        defer { try? handle.close() }
+        let descriptor = handle.fileDescriptor
+        var recentOutput = RecentFFmpegLines(limit: 18)
+        var current = FFmpegProgress(total: 0, currentFile: 0, speed: "-", eta: "-", currentItem: "FFmpeg", logLine: "FFmpeg 已启动")
+        progress(current)
+
+        func consumeLine(_ line: String) {
+            recentOutput.append(line)
+            current = parse(line: line, duration: duration, current: current)
+            if isProgressFlush(line) {
+                progress(current)
+            }
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var pending = Data()
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            if count == 0 { break }
+            if count < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            pending.append(contentsOf: buffer.prefix(count))
+            while let newline = pending.firstIndex(of: 0x0A) {
+                consumeLine(String(decoding: pending[..<newline], as: UTF8.self))
+                pending.removeSubrange(...newline)
+            }
+        }
+        if !pending.isEmpty {
+            consumeLine(String(decoding: pending, as: UTF8.self))
+        }
+        return recentOutput.tail()
+    }
+
+    private nonisolated static func parse(line: String, duration: TimeInterval, current: FFmpegProgress) -> FFmpegProgress {
         var next = current
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         next.logLine = trimmed
@@ -390,28 +435,28 @@ final class FFmpegRunner {
         return next
     }
 
-    private static func isProgressFlush(_ line: String) -> Bool {
+    private nonisolated static func isProgressFlush(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("progress=")
     }
 
-    private static func value(in line: String, key: String) -> String? {
+    private nonisolated static func value(in line: String, key: String) -> String? {
         let prefix = "\(key)="
         guard line.hasPrefix(prefix) else { return nil }
         return String(line.dropFirst(prefix.count))
     }
 
-    private static func fraction(seconds: TimeInterval, duration: TimeInterval) -> Double {
+    private nonisolated static func fraction(seconds: TimeInterval, duration: TimeInterval) -> Double {
         guard duration > 0 else { return 0 }
         return min(max(seconds / duration, 0), 1)
     }
 
-    private static func seconds(fromTimestamp value: String) -> TimeInterval? {
+    private nonisolated static func seconds(fromTimestamp value: String) -> TimeInterval? {
         let parts = value.split(separator: ":").compactMap(Double.init)
         guard parts.count == 3 else { return nil }
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     }
 
-    private static func formatTimestamp(_ seconds: TimeInterval) -> String {
+    private nonisolated static func formatTimestamp(_ seconds: TimeInterval) -> String {
         let total = max(Int(seconds), 0)
         return String(format: "%02d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
     }
@@ -564,32 +609,7 @@ final class FFmpegRunner {
     }
 }
 
-private final class ProcessCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-
-    init(continuation: CheckedContinuation<Void, Error>) {
-        self.continuation = continuation
-    }
-
-    func resume(_ result: Result<Void, Error>) {
-        let continuation = lock.withLock {
-            let continuation = self.continuation
-            self.continuation = nil
-            return continuation
-        }
-        guard let continuation else { return }
-        switch result {
-        case .success:
-            continuation.resume()
-        case .failure(let error):
-            continuation.resume(throwing: error)
-        }
-    }
-}
-
-private final class RecentFFmpegLines: @unchecked Sendable {
-    private let lock = NSLock()
+private struct RecentFFmpegLines {
     private let limit: Int
     private var lines: [String] = []
 
@@ -597,30 +617,18 @@ private final class RecentFFmpegLines: @unchecked Sendable {
         self.limit = limit
     }
 
-    func append(_ line: String) {
+    mutating func append(_ line: String) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        lock.withLock {
-            lines.append(trimmed)
-            if lines.count > limit {
-                lines.removeFirst(lines.count - limit)
-            }
+        lines.append(trimmed)
+        if lines.count > limit {
+            lines.removeFirst(lines.count - limit)
         }
     }
 
     func tail() -> String? {
-        lock.withLock {
-            let text = lines.joined(separator: "\n")
-            return text.isEmpty ? nil : text
-        }
-    }
-}
-
-private extension NSLock {
-    func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock()
-        defer { unlock() }
-        return try body()
+        let text = lines.joined(separator: "\n")
+        return text.isEmpty ? nil : text
     }
 }
 

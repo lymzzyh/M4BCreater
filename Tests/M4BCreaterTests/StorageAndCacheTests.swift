@@ -20,6 +20,78 @@ struct StorageAndCacheTests {
         #expect(ffprobe.map { FileManager.default.isExecutableFile(atPath: $0.path(percentEncoded: false)) } == true)
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [0, 17])
+    func ffmpegRunnerDrainsOutputFromFastExits(status: Int) async throws {
+        let runner = FFmpegRunner()
+        let jobID = UUID()
+        let script = "printf 'out_time_ms=500000\\nspeed=2x\\nprogress=end\\nlast diagnostic' >&2; exit \"$1\""
+        let arguments = ["-c", script, "ffmpeg-test", String(status)]
+
+        for _ in 0..<40 {
+            let (updates, continuation) = AsyncStream<FFmpegProgress>.makeStream()
+            do {
+                try await runner.run(
+                    jobID: jobID,
+                    executable: URL(filePath: "/bin/sh"),
+                    arguments: arguments,
+                    progressDuration: 1,
+                    progress: { continuation.yield($0) }
+                )
+                #expect(status == 0)
+            } catch FFmpegError.failed(let code, let detail) {
+                #expect(status != 0)
+                #expect(code == Int32(status))
+                #expect(detail?.hasSuffix("last diagnostic") == true)
+            }
+            continuation.finish()
+
+            var logLines: [String] = []
+            for await update in updates {
+                logLines.append(update.logLine)
+            }
+            #expect(logLines == ["FFmpeg 已启动", "time=00:00:00 speed=2x progress=end", "FFmpeg 退出，状态码 \(status)"])
+            #expect(!runner.hasActiveProcess(jobID: jobID))
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func ffmpegRunnerReportsProgressBeforeChildExits() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appending(path: "progress-seen").path(percentEncoded: false)
+        let script = """
+        printf 'progress=continue\\n' >&2
+        attempts=0
+        until [ -f "$1" ]; do
+            [ "$attempts" -lt 100 ] || exit 18
+            attempts=$((attempts + 1))
+            sleep 0.02
+        done
+        """
+        try await FFmpegRunner().run(
+            jobID: UUID(),
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", script, "ffmpeg-test", marker],
+            progressDuration: 1
+        ) { update in
+            if update.logLine.hasSuffix("progress=continue") {
+                FileManager.default.createFile(atPath: marker, contents: nil)
+            }
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func ffmpegRunnerReleasesPipeIfExecutableCannotLaunch() async {
+        let runner = FFmpegRunner()
+        let jobID = UUID()
+        let missingPath = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        await #expect(throws: CocoaError.self) {
+            try await runner.run(jobID: jobID, executable: missingPath, arguments: [], progressDuration: 0) { _ in }
+        }
+        #expect(!runner.hasActiveProcess(jobID: jobID))
+    }
+
     @Test
     func transcodeArgumentsUseSelectedHighBitrate() {
         let runner = FFmpegRunner()
