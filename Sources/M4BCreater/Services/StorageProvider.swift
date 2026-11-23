@@ -110,22 +110,30 @@ final class LocalStorageProvider: StorageProvider {
     }
 
     func download(from remoteURL: URL, to localURL: URL, progress: @escaping @Sendable (TransferProgress) -> Void) async throws {
-        try fileManager.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fileManager.fileExists(atPath: localURL.path(percentEncoded: false)) {
-            try fileManager.removeItem(at: localURL)
-        }
-        try fileManager.copyItem(at: remoteURL, to: localURL)
+        try await Self.copy(from: remoteURL, to: localURL)
         let size = (try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
         progress(TransferProgress(fraction: 1, bytesTransferred: size, totalBytes: size, bytesPerSecond: 0))
     }
 
     func upload(from localURL: URL, to remoteURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
-        try fileManager.createDirectory(at: remoteURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fileManager.fileExists(atPath: remoteURL.path(percentEncoded: false)) {
-            try fileManager.removeItem(at: remoteURL)
-        }
-        try fileManager.copyItem(at: localURL, to: remoteURL)
+        try await Self.copy(from: localURL, to: remoteURL)
         progress(1)
+    }
+
+    private nonisolated static func copy(from source: URL, to destination: URL) async throws {
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result {
+                    let manager = FileManager.default
+                    try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if manager.fileExists(atPath: destination.path(percentEncoded: false)) {
+                        try manager.removeItem(at: destination)
+                    }
+                    try manager.copyItem(at: source, to: destination)
+                })
+            }
+        }
     }
 
     func displayPath(for url: URL) -> String {

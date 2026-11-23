@@ -176,7 +176,7 @@ struct JobDetailView: View {
     }
 
     private var orderedCacheEntries: [CacheEntry] {
-        let orderByURL = Dictionary(uniqueKeysWithValues: job.chapters.enumerated().map { ($0.element.sourceURL, $0.offset) })
+        let orderByURL = Dictionary(job.chapters.enumerated().map { ($0.element.sourceURL, $0.offset) }, uniquingKeysWith: min)
         return job.cacheEntries.sorted { lhs, rhs in
             let lhsOrder = orderByURL[lhs.remoteURL] ?? Int.max
             let rhsOrder = orderByURL[rhs.remoteURL] ?? Int.max
@@ -326,6 +326,7 @@ private struct MetadataEditor: View {
 private struct CoverPicker: View {
     @Binding var metadata: BookMetadata
     var isEditable: Bool
+    @State private var previewImage: NSImage?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -352,11 +353,18 @@ private struct CoverPicker: View {
             }
         }
         .disabled(!isEditable)
+        .task(id: metadata.coverURL) {
+            previewImage = nil
+            guard let url = metadata.coverURL else { return }
+            let data = await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
+            guard !Task.isCancelled, let data else { return }
+            previewImage = NSImage(data: data)
+        }
     }
 
     @ViewBuilder
     private var coverPreview: some View {
-        if let coverURL = metadata.coverURL, let image = NSImage(contentsOf: coverURL) {
+        if let image = previewImage {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()

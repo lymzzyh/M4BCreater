@@ -437,12 +437,15 @@ struct WebDAVCredential: Codable, Identifiable, Hashable {
 }
 
 struct AppSettings: Codable, Hashable {
+    static let defaultTranscodeConcurrency = 4
+
     var cacheDirectory: URL
     var cacheLimitBytes: Int64
     var autoCleanCompletedCache: Bool
     var webDAVMaxRetries: Int
     var webDAVStallTimeoutSeconds: Double
     var webDAVPrefetchCount: Int
+    var transcodeConcurrency: Int
     var fragmentedM4BThresholdHours: Int
     var fragmentedM4BThresholdTracks: Int
 
@@ -467,6 +470,7 @@ struct AppSettings: Codable, Hashable {
         case webDAVMaxRetries
         case webDAVStallTimeoutSeconds
         case webDAVPrefetchCount
+        case transcodeConcurrency
         case fragmentedM4BThresholdHours
         case fragmentedM4BThresholdTracks
     }
@@ -478,6 +482,7 @@ struct AppSettings: Codable, Hashable {
         webDAVMaxRetries: Int = 3,
         webDAVStallTimeoutSeconds: Double = 30,
         webDAVPrefetchCount: Int = 1,
+        transcodeConcurrency: Int = Self.defaultTranscodeConcurrency,
         fragmentedM4BThresholdHours: Int = 72,
         fragmentedM4BThresholdTracks: Int = 500
     ) {
@@ -486,7 +491,8 @@ struct AppSettings: Codable, Hashable {
         self.autoCleanCompletedCache = autoCleanCompletedCache
         self.webDAVMaxRetries = webDAVMaxRetries
         self.webDAVStallTimeoutSeconds = webDAVStallTimeoutSeconds
-        self.webDAVPrefetchCount = webDAVPrefetchCount
+        self.webDAVPrefetchCount = max(webDAVPrefetchCount, 1)
+        self.transcodeConcurrency = max(transcodeConcurrency, 1)
         self.fragmentedM4BThresholdHours = fragmentedM4BThresholdHours
         self.fragmentedM4BThresholdTracks = fragmentedM4BThresholdTracks
     }
@@ -499,7 +505,8 @@ struct AppSettings: Codable, Hashable {
         autoCleanCompletedCache = try container.decodeIfPresent(Bool.self, forKey: .autoCleanCompletedCache) ?? defaults.autoCleanCompletedCache
         webDAVMaxRetries = try container.decodeIfPresent(Int.self, forKey: .webDAVMaxRetries) ?? defaults.webDAVMaxRetries
         webDAVStallTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .webDAVStallTimeoutSeconds) ?? defaults.webDAVStallTimeoutSeconds
-        webDAVPrefetchCount = try container.decodeIfPresent(Int.self, forKey: .webDAVPrefetchCount) ?? defaults.webDAVPrefetchCount
+        webDAVPrefetchCount = max(try container.decodeIfPresent(Int.self, forKey: .webDAVPrefetchCount) ?? defaults.webDAVPrefetchCount, 1)
+        transcodeConcurrency = max(try container.decodeIfPresent(Int.self, forKey: .transcodeConcurrency) ?? defaults.transcodeConcurrency, 1)
         fragmentedM4BThresholdHours = try container.decodeIfPresent(Int.self, forKey: .fragmentedM4BThresholdHours) ?? defaults.fragmentedM4BThresholdHours
         fragmentedM4BThresholdTracks = try container.decodeIfPresent(Int.self, forKey: .fragmentedM4BThresholdTracks) ?? defaults.fragmentedM4BThresholdTracks
     }

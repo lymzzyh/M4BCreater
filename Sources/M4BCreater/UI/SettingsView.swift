@@ -60,6 +60,7 @@ struct SettingsView: View {
 
             Divider()
 
+            concurrencyField("转码并发", symbol: "waveform", setting: \.transcodeConcurrency)
             m4bPackagingSettings
             Spacer()
         }
@@ -196,24 +197,7 @@ struct SettingsView: View {
             Text("传输策略")
                 .font(.headline)
 
-            HStack {
-                Label("预取并发", systemImage: "square.stack.3d.up")
-                Spacer()
-                Picker("预取并发", selection: Binding(
-                    get: { settings.webDAVPrefetchCount },
-                    set: {
-                        settings.webDAVPrefetchCount = $0
-                        coordinator.updateSettings(settings)
-                    }
-                )) {
-                    Text("1 个").tag(1)
-                    Text("2 个").tag(2)
-                    Text("3 个").tag(3)
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 180)
-            }
+            concurrencyField("下载并发", symbol: "square.stack.3d.up", setting: \.webDAVPrefetchCount)
 
             HStack {
                 Label("失败重试", systemImage: "arrow.clockwise")
@@ -250,8 +234,23 @@ struct SettingsView: View {
                 .frame(width: 150)
             }
 
-            Text("下载使用系统下载任务，进度低频刷新；预取并发只影响 WebDAV 输入音轨，不改变转码并发。")
-                .font(.callout)
+        }
+    }
+
+    private func concurrencyField(_ title: String, symbol: String, setting: WritableKeyPath<AppSettings, Int>) -> some View {
+        HStack {
+            Label(title, systemImage: symbol)
+            Spacer()
+            TextField(title, value: Binding(
+                get: { settings[keyPath: setting] },
+                set: { value in
+                    settings[keyPath: setting] = max(value, 1)
+                    coordinator.updateSettings(settings)
+                }
+            ), format: .number.grouping(.never))
+            .multilineTextAlignment(.trailing)
+            .frame(width: 90)
+            Text("路")
                 .foregroundStyle(.secondary)
         }
     }

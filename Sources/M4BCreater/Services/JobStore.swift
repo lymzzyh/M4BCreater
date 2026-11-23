@@ -1,6 +1,6 @@
 import Foundation
 
-struct PersistedState: Codable {
+struct PersistedState: Codable, Sendable {
     var jobs: [ConversionJob]
     var settings: AppSettings
     var webDAVCredentials: [WebDAVCredential]
@@ -25,10 +25,14 @@ struct PersistedState: Codable {
     }
 }
 
-final class JobStore {
+final class JobStore: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let stateURL: URL
     private let backupURL: URL
+    private static let writeQueue = DispatchQueue(label: "com.m4bcreater.state", qos: .utility)
+    private let pendingLock = NSLock()
+    private var pendingState: PersistedState?
+    private var isWriting = false
 
     init(directory: URL? = nil) {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -49,6 +53,47 @@ final class JobStore {
     }
 
     func save(_ state: PersistedState) {
+        scheduleSave(state)
+        Self.flush()
+    }
+
+    func scheduleSave(_ state: PersistedState) {
+        pendingLock.withLock {
+            pendingState = state
+            guard !isWriting else { return }
+            isWriting = true
+            Self.writeQueue.async { self.writePendingStates() }
+        }
+    }
+
+    static func flush() {
+        writeQueue.sync {}
+    }
+
+    func waitForScheduledSaves() async {
+        await withCheckedContinuation { continuation in
+            Self.writeQueue.async { continuation.resume() }
+        }
+    }
+
+    private func writePendingStates() {
+        while let state = takePendingState() {
+            write(state)
+        }
+    }
+
+    private func takePendingState() -> PersistedState? {
+        pendingLock.withLock {
+            guard let state = pendingState else {
+                isWriting = false
+                return nil
+            }
+            pendingState = nil
+            return state
+        }
+    }
+
+    private func write(_ state: PersistedState) {
         guard let data = try? JSONEncoder.app.encode(state) else { return }
         backupCurrentStateIfNeeded()
         try? data.write(to: stateURL, options: [.atomic])

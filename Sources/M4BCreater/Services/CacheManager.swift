@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 @MainActor
 final class CacheManager {
@@ -30,10 +31,18 @@ final class CacheManager {
         }
     }
 
-    func missingIntermediateTrackIndices(_ trackURLs: [URL]) throws -> [Int] {
+    func missingIntermediateTrackIndices(_ trackURLs: [URL]) async throws -> [Int] {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result { try Self.scanIntermediateTracks(trackURLs) })
+            }
+        }
+    }
+
+    private nonisolated static func scanIntermediateTracks(_ trackURLs: [URL]) throws -> [Int] {
         guard let directory = trackURLs.first?.deletingLastPathComponent() else { return [] }
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        let files = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys))
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys))
         let fileNames = Set(files.compactMap { url -> String? in
             guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true else {
                 return nil
@@ -68,17 +77,22 @@ final class CacheManager {
         try workDirectory(for: job, settings: settings).appending(path: fileName)
     }
 
-    func localURLForCachedRemote(_ remoteURL: URL, job: ConversionJob, settings: AppSettings) throws -> URL {
-        try localURLForCachedRemote(remoteURL, jobID: job.id, settings: settings)
-    }
-
-    func localURLForCachedRemote(_ remoteURL: URL, jobID: UUID, settings: AppSettings) throws -> URL {
+    func localURLForCachedRemote(_ remoteURL: URL, jobID: UUID, settings: AppSettings, disambiguate: Bool = false) throws -> URL {
         let safeName = remoteURL.lastPathComponent.isEmpty ? UUID().uuidString : remoteURL.lastPathComponent
-        let directory = settings.cacheDirectory
+        var directory = settings.cacheDirectory
             .appending(path: jobID.uuidString, directoryHint: .isDirectory)
             .appending(path: "sources", directoryHint: .isDirectory)
+        if disambiguate {
+            let digest = SHA256.hash(data: Data(remoteURL.absoluteString.utf8))
+            let directoryName = digest.map { String(format: "%02x", $0) }.joined()
+            directory.append(path: directoryName, directoryHint: .isDirectory)
+        }
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appending(path: safeName)
+    }
+
+    func localURLForCachedRemote(_ remoteURL: URL, job: ConversionJob, settings: AppSettings) throws -> URL {
+        try localURLForCachedRemote(remoteURL, jobID: job.id, settings: settings)
     }
 
     func cacheBytes(in directory: URL) -> Int64 {

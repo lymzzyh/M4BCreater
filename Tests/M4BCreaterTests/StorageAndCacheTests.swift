@@ -93,6 +93,67 @@ struct StorageAndCacheTests {
     }
 
     @Test(.timeLimit(.minutes(1)))
+    func ffmpegRunnerTerminatesAllProcessesInAPausedJob() async throws {
+        let runner = FFmpegRunner()
+        let jobID = UUID()
+        let (progress, continuation) = AsyncStream<FFmpegProgress>.makeStream()
+        defer { continuation.finish() }
+        let executable = URL(filePath: "/bin/sh")
+        let arguments = ["-c", "printf 'progress=continue\\n' >&2; exec /bin/sleep 5"]
+
+        await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    do {
+                        try await runner.run(jobID: jobID, executable: executable, arguments: arguments, progressDuration: 5) {
+                            continuation.yield($0)
+                        }
+                        return false
+                    } catch FFmpegError.failed(let status, _) {
+                        return status == SIGTERM
+                    } catch {
+                        return false
+                    }
+                }
+            }
+            var started = 0
+            for await update in progress {
+                if update.logLine.hasSuffix("progress=continue") { started += 1 }
+                if started == 2 || update.logLine.hasPrefix("FFmpeg 退出") { break }
+            }
+            #expect(started == 2)
+            runner.pause(jobID: jobID)
+            runner.terminate(jobID: jobID)
+            for await wasTerminated in group {
+                #expect(wasTerminated)
+            }
+        }
+        #expect(!runner.hasActiveProcess(jobID: jobID))
+    }
+
+    @Test
+    func decodingParallelismPreservesValuesAboveEight() throws {
+        let data = Data(#"{"webDAVPrefetchCount":16,"transcodeConcurrency":12}"#.utf8)
+        let settings = try JSONDecoder.app.decode(AppSettings.self, from: data)
+        #expect(settings.webDAVPrefetchCount == 16)
+        #expect(settings.transcodeConcurrency == 12)
+    }
+
+    @Test
+    func jobStoreFlushesLatestScheduledSnapshot() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let store = JobStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var settings = AppSettings.default
+        for count in 1...20 {
+            settings.transcodeConcurrency = count
+            store.scheduleSave(PersistedState(jobs: [], settings: settings, webDAVCredentials: []))
+        }
+        JobStore.flush()
+        #expect(store.load().settings.transcodeConcurrency == 20)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
     func webDAVDownloadTimesOutWithoutNetworkProgress() async throws {
         let target = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         let operation = WebDAVDownloadOperation(localURL: target, requestTimeout: 0.25, progressInterval: 0.5) { _ in }
@@ -110,9 +171,9 @@ struct StorageAndCacheTests {
     }
 
     @Test
-    func transcodeArgumentsUseSelectedHighBitrate() {
+    func transcodeArgumentsUseSelectedHighBitrate() async {
         let runner = FFmpegRunner()
-        let args = runner.ffmpegArgumentsForTranscode(
+        let args = await runner.ffmpegArgumentsForTranscode(
             sourceURL: URL(filePath: "/tmp/input.mp3"),
             outputURL: URL(filePath: "/tmp/output.m4a"),
             encodingSettings: EncodingSettings(codec: .aac, bitrateKbps: 320)
@@ -122,13 +183,14 @@ struct StorageAndCacheTests {
         #expect(!args.contains("-filter:a"))
         #expect(args.contains("-progress"))
         #expect(args.contains("pipe:2"))
-        #expect(args.contains(runner.audioEncoderName(for: EncodingSettings(codec: .aac, bitrateKbps: 320))))
+        let encoder = await runner.audioEncoderName(for: EncodingSettings(codec: .aac, bitrateKbps: 320))
+        #expect(args.contains(encoder))
     }
 
     @Test
-    func transcodeArgumentsUseAtempoForPlaybackSpeed() {
+    func transcodeArgumentsUseAtempoForPlaybackSpeed() async {
         let runner = FFmpegRunner()
-        let args = runner.ffmpegArgumentsForTranscode(
+        let args = await runner.ffmpegArgumentsForTranscode(
             sourceURL: URL(filePath: "/tmp/input.mp3"),
             outputURL: URL(filePath: "/tmp/output.m4a"),
             encodingSettings: EncodingSettings(codec: .aac, bitrateKbps: 192, playbackSpeed: 3.0)
@@ -323,6 +385,7 @@ struct StorageAndCacheTests {
         #expect(settings.webDAVMaxRetries == 3)
         #expect(settings.webDAVStallTimeoutSeconds == 30)
         #expect(settings.webDAVPrefetchCount == 1)
+        #expect(settings.transcodeConcurrency == AppSettings.defaultTranscodeConcurrency)
         #expect(settings.fragmentedM4BThresholdHours == 72)
         #expect(settings.fragmentedM4BThresholdTracks == 500)
     }
@@ -456,7 +519,8 @@ struct StorageAndCacheTests {
         try existingMarker.write(to: tracks[1].appendingPathExtension("done"))
         try Data().write(to: tracks[2])
         try existingMarker.write(to: tracks[2].appendingPathExtension("done"))
-        #expect(try cache.missingIntermediateTrackIndices(tracks) == [1, 2, 4])
+        let missingTracks = try await cache.missingIntermediateTrackIndices(tracks)
+        #expect(missingTracks == [1, 2, 4])
         for index in [1, 2, 4] {
             let source = try cache.localURLForCachedRemote(chapters[index].sourceURL, job: job, settings: settings)
             try FileManager.default.copyItem(at: fixture, to: source)
@@ -476,8 +540,10 @@ struct StorageAndCacheTests {
         let conversions = finished.progress.eventLog.compactMap { line in
             chapters.indices.first { line.contains("转码音轨 \($0 + 1)/\(chapters.count)：") }
         }
-        #expect(conversions == [4, 1, 2])
-        #expect(try cache.missingIntermediateTrackIndices(tracks).isEmpty)
+        #expect(conversions.first == 4)
+        #expect(Set(conversions.dropFirst()) == [1, 2])
+        let remainingTracks = try await cache.missingIntermediateTrackIndices(tracks)
+        #expect(remainingTracks.isEmpty)
         for index in [0, 3] {
             #expect(try Data(contentsOf: tracks[index].appendingPathExtension("done")) == existingMarker)
         }

@@ -12,8 +12,9 @@ struct FFmpegProgress: Hashable, Sendable {
 
 @MainActor
 final class FFmpegRunner {
-    private var processByJobID: [UUID: Process] = [:]
-    private var cachedAACEncoderName: String?
+    private var processesByJobID: [UUID: [UUID: Process]] = [:]
+    private var pausedJobs: Set<UUID> = []
+    private var aacEncoderDetection: Task<String, Never>?
 
     func bundledFFmpegURL() -> URL? {
         bundledExecutableURL(named: "ffmpeg")
@@ -32,10 +33,10 @@ final class FFmpegRunner {
             : "FFmpeg 存在但不可执行"
     }
 
-    func audioEncoderName(for settings: EncodingSettings) -> String {
+    func audioEncoderName(for settings: EncodingSettings) async -> String {
         switch settings.codec {
         case .aac:
-            preferredAACEncoderName()
+            await preferredAACEncoderName()
         }
     }
 
@@ -76,7 +77,7 @@ final class FFmpegRunner {
             throw FFmpegError.missingBinary
         }
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let arguments = ffmpegArgumentsForTranscode(sourceURL: sourceURL, outputURL: outputURL, encodingSettings: encodingSettings)
+        let arguments = await ffmpegArgumentsForTranscode(sourceURL: sourceURL, outputURL: outputURL, encodingSettings: encodingSettings)
         let duration = ((try? await probeDuration(sourceURL)) ?? 0) / max(encodingSettings.playbackSpeed, 0.1)
         try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: duration, progress: progress)
         return outputURL
@@ -198,9 +199,7 @@ final class FFmpegRunner {
         }
 
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
-        let process = Process()
-        process.executableURL = ffmpeg
-        process.arguments = [
+        let arguments = [
             "-hide_banner",
             "-nostdin",
             "-y",
@@ -209,21 +208,11 @@ final class FFmpegRunner {
             "-update", "1",
             normalizedURL.path(percentEncoded: false)
         ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: data, encoding: .utf8)
-                .map(Self.failureTail(from:))
-            throw FFmpegError.failed(status: process.terminationStatus, detail: detail)
-        }
+        try await run(jobID: jobID, executable: ffmpeg, arguments: arguments, progressDuration: 0) { _ in }
         return normalizedURL
     }
 
-    func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) -> [String] {
+    func ffmpegArgumentsForTranscode(sourceURL: URL, outputURL: URL, encodingSettings: EncodingSettings) async -> [String] {
         var arguments = [
             "-hide_banner",
             "-nostdin",
@@ -237,7 +226,7 @@ final class FFmpegRunner {
             arguments += ["-filter:a", atempoFilter]
         }
         arguments += [
-            "-c:a", audioEncoderName(for: encodingSettings),
+            "-c:a", await audioEncoderName(for: encodingSettings),
             "-b:a", "\(encodingSettings.bitrateKbps)k",
             outputURL.path(percentEncoded: false)
         ]
@@ -291,21 +280,30 @@ final class FFmpegRunner {
     }
 
     func pause(jobID: UUID) {
-        guard let process = processByJobID[jobID], process.isRunning else { return }
-        kill(process.processIdentifier, SIGSTOP)
+        pausedJobs.insert(jobID)
+        signalProcesses(for: jobID, with: SIGSTOP)
     }
 
     func resume(jobID: UUID) {
-        guard let process = processByJobID[jobID], process.isRunning else { return }
-        kill(process.processIdentifier, SIGCONT)
+        pausedJobs.remove(jobID)
+        signalProcesses(for: jobID, with: SIGCONT)
     }
 
     func hasActiveProcess(jobID: UUID) -> Bool {
-        processByJobID[jobID]?.isRunning == true
+        processesByJobID[jobID]?.values.contains { $0.isRunning } == true
     }
 
     func terminate(jobID: UUID) {
-        processByJobID[jobID]?.terminate()
+        pausedJobs.remove(jobID)
+        signalProcesses(for: jobID, with: SIGTERM)
+        signalProcesses(for: jobID, with: SIGCONT)
+    }
+
+    private func signalProcesses(for jobID: UUID, with signal: Int32) {
+        guard let processes = processesByJobID[jobID] else { return }
+        for process in processes.values where process.isRunning {
+            kill(process.processIdentifier, signal)
+        }
     }
 
     func run(
@@ -315,14 +313,24 @@ final class FFmpegRunner {
         progressDuration: TimeInterval,
         progress: @escaping @Sendable (FFmpegProgress) -> Void
     ) async throws {
+        while pausedJobs.contains(jobID) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try Task.checkCancellation()
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         let pipe = Pipe()
         process.standardError = pipe
         process.standardOutput = pipe
-        processByJobID[jobID] = process
-        defer { processByJobID[jobID] = nil }
+        let processID = UUID()
+        processesByJobID[jobID, default: [:]][processID] = process
+        defer {
+            processesByJobID[jobID]?[processID] = nil
+            if processesByJobID[jobID]?.isEmpty == true {
+                processesByJobID[jobID] = nil
+            }
+        }
 
         async let recentOutput = Self.readOutput(
             from: pipe.fileHandleForReading,
@@ -461,48 +469,21 @@ final class FFmpegRunner {
         return String(format: "%02d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
     }
 
-    private static func failureTail(from text: String) -> String {
-        text.split(whereSeparator: \.isNewline)
-            .suffix(12)
-            .map(String.init)
-            .joined(separator: "\n")
-    }
-
-    private func preferredAACEncoderName() -> String {
-        if let cachedAACEncoderName {
-            return cachedAACEncoderName
+    private func preferredAACEncoderName() async -> String {
+        if let aacEncoderDetection {
+            return await aacEncoderDetection.value
         }
-        let encoderName = availableEncoderNames().contains("aac_at") ? "aac_at" : "aac"
-        cachedAACEncoderName = encoderName
-        return encoderName
-    }
-
-    private func availableEncoderNames() -> Set<String> {
-        guard let ffmpeg = bundledFFmpegURL() else {
-            return []
+        guard let ffmpeg = bundledFFmpegURL() else { return "aac" }
+        let detection = Task {
+            let text = (try? await Self.captureOutput(from: ffmpeg, arguments: ["-hide_banner", "-encoders"])) ?? ""
+            let supportsAudioToolbox = text.split(whereSeparator: \.isNewline).contains { line in
+                let parts = line.split(whereSeparator: \.isWhitespace)
+                return parts.count >= 2 && parts[0].contains("A") && parts[1] == "aac_at"
+            }
+            return supportsAudioToolbox ? "aac_at" : "aac"
         }
-        let process = Process()
-        process.executableURL = ffmpeg
-        process.arguments = ["-hide_banner", "-encoders"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return []
-        }
-        guard process.terminationStatus == 0 else {
-            return []
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8) ?? ""
-        return Set(text.split(whereSeparator: \.isNewline).compactMap { line in
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard parts.count >= 2, parts[0].contains("A") else { return nil }
-            return String(parts[1])
-        })
+        aacEncoderDetection = detection
+        return await detection.value
     }
 
     private func durations(for urls: [URL]) async -> [TimeInterval] {
@@ -517,23 +498,34 @@ final class FFmpegRunner {
         guard let ffprobe = bundledFFprobeURL() else {
             return 0
         }
-        let process = Process()
-        process.executableURL = ffprobe
-        process.arguments = [
+        let arguments = [
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             url.path(percentEncoded: false)
         ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return 0 }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
-        return TimeInterval(text) ?? 0
+        let text = try await Self.captureOutput(from: ffprobe, arguments: arguments)
+        return TimeInterval(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    private nonisolated static func captureOutput(from executable: URL, arguments: [String]) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result {
+                    let process = Process()
+                    let pipe = Pipe()
+                    process.executableURL = executable
+                    process.arguments = arguments
+                    process.standardOutput = pipe
+                    process.standardError = FileHandle.nullDevice
+                    try process.run()
+                    let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
+                    process.waitUntilExit()
+                    guard process.terminationStatus == 0 else { return "" }
+                    return String(decoding: data, as: UTF8.self)
+                })
+            }
+        }
     }
 
     private static func escapeConcatPath(_ url: URL) -> String {

@@ -59,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        JobStore.flush()
         DistributedNotificationCenter.default().removeObserver(self)
         singleInstance.releaseLock()
     }

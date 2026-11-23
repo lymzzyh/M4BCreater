@@ -18,6 +18,8 @@ final class ConversionCoordinator: ObservableObject {
     private lazy var webDAVProvider = WebDAVStorageProvider(credentialStore: credentialStore)
     private var lastFFmpegUIUpdateAtByJobID: [UUID: Date] = [:]
     private var lastFFmpegLogAtByJobID: [UUID: Date] = [:]
+    private var lastDownloadUpdateByJobID: [UUID: ContinuousClock.Instant] = [:]
+    private var activeRuns: [UUID: Task<Void, Never>] = [:]
 
     init(store: JobStore = JobStore()) {
         self.store = store
@@ -116,6 +118,20 @@ final class ConversionCoordinator: ObservableObject {
     func start(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         guard jobs[index].state != .running else { return }
+        if let previousRun = activeRuns[jobID] {
+            let state = jobs[index].state
+            if state == .paused {
+                resume(jobID: jobID)
+                return
+            }
+            Task {
+                await previousRun.value
+                guard currentState(jobID: jobID) == state else { return }
+                start(jobID: jobID)
+            }
+            return
+        }
+        ffmpegRunner.resume(jobID: jobID)
         jobs[index].state = .running
         jobs[index].hasStarted = true
         jobs[index].errorMessage = nil
@@ -123,13 +139,19 @@ final class ConversionCoordinator: ObservableObject {
         appendLog(jobID: jobID, "任务开始：\(jobs[index].title)")
         persist()
 
-        Task {
+        activeRuns[jobID] = Task {
+            defer {
+                activeRuns[jobID] = nil
+                lastDownloadUpdateByJobID[jobID] = nil
+            }
+            await store.waitForScheduledSaves()
             await run(jobID: jobID)
         }
     }
 
     func pause(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .running else { return }
         ffmpegRunner.pause(jobID: jobID)
         jobs[index].state = .paused
         jobs[index].updatedAt = Date()
@@ -139,17 +161,11 @@ final class ConversionCoordinator: ObservableObject {
 
     func resume(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        if jobs[index].stage == .transcoding || jobs[index].stage == .packaging {
-            if ffmpegRunner.hasActiveProcess(jobID: jobID) {
-                ffmpegRunner.resume(jobID: jobID)
-                jobs[index].state = .running
-                jobs[index].updatedAt = Date()
-                appendLog(jobID: jobID, "任务继续")
-                persist()
-            } else {
-                appendLog(jobID: jobID, "未发现可继续的 FFmpeg 进程，重新进入可恢复流程")
-                start(jobID: jobID)
-            }
+        guard jobs[index].state == .paused else { return }
+        if activeRuns[jobID] != nil {
+            ffmpegRunner.resume(jobID: jobID)
+            jobs[index].state = .running
+            appendLog(jobID: jobID, "任务继续")
         } else {
             start(jobID: jobID)
         }
@@ -157,8 +173,9 @@ final class ConversionCoordinator: ObservableObject {
 
     func cancel(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        ffmpegRunner.terminate(jobID: jobID)
         jobs[index].state = .cancelled
+        activeRuns[jobID]?.cancel()
+        ffmpegRunner.terminate(jobID: jobID)
         jobs[index].updatedAt = Date()
         appendLog(jobID: jobID, "任务取消")
         persist()
@@ -167,15 +184,23 @@ final class ConversionCoordinator: ObservableObject {
     func deleteJob(jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let job = jobs[index]
-        if job.state == .running {
-            ffmpegRunner.terminate(jobID: jobID)
-        }
-        cacheManager.removeWorkDirectory(for: job, settings: settings)
+        let cacheSettings = settings
+        let activeRun = activeRuns[jobID]
+        activeRun?.cancel()
+        ffmpegRunner.terminate(jobID: jobID)
         jobs.remove(at: index)
         if selectedJobID == jobID {
             selectedJobID = jobs.first?.id
         }
         persist()
+        if let activeRun {
+            Task {
+                await activeRun.value
+                cacheManager.removeWorkDirectory(for: job, settings: cacheSettings)
+            }
+        } else {
+            cacheManager.removeWorkDirectory(for: job, settings: cacheSettings)
+        }
     }
 
     func updateMetadata(for jobID: UUID, metadata: BookMetadata) {
@@ -287,6 +312,7 @@ final class ConversionCoordinator: ObservableObject {
 
     private func run(jobID: UUID) async {
         do {
+            try await waitUntilRunning(jobID)
             guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             var job = jobs[index]
             job.chapters = normalizedChapters(job.chapters)
@@ -298,7 +324,7 @@ final class ConversionCoordinator: ObservableObject {
             }
 
             let intermediateTracks = try await transcodePipeline(for: job)
-            guard currentState(jobID: jobID) == .running else { return }
+            try await waitUntilRunning(jobID)
 
             let volumePlans = Self.volumePlans(
                 baseFileName: job.outputFileName,
@@ -310,7 +336,7 @@ final class ConversionCoordinator: ObservableObject {
             appendLog(jobID: jobID, volumePlans.count > 1 ? "开始分卷封装：\(volumePlans.count) 卷" : "开始封装 M4B")
             var packagedOutputs: [(url: URL, fileName: String)] = []
             for plan in volumePlans {
-                guard currentState(jobID: jobID) == .running else { throw ConversionError.interrupted }
+                try await waitUntilRunning(jobID)
                 update(jobID: jobID, stage: .packaging, total: 1, currentItem: plan.label)
                 appendLog(jobID: jobID, "开始封装 \(plan.label)：\(plan.outputFileName)")
                 let localOutput = try cacheManager.finalOutputURL(for: job, fileName: plan.outputFileName, settings: settings)
@@ -331,12 +357,15 @@ final class ConversionCoordinator: ObservableObject {
                 packagedOutputs.append((localOutput, plan.outputFileName))
             }
 
+            try await waitUntilRunning(jobID)
             update(jobID: jobID, stage: .writingOutput, total: 1, currentItem: "写入输出目录")
             appendLog(jobID: jobID, "写入输出：\(job.output.displayPath)")
             for output in packagedOutputs {
+                try await waitUntilRunning(jobID)
                 try await writeOutput(localOutput: output.url, fileName: output.fileName, job: job)
             }
 
+            try await waitUntilRunning(jobID)
             guard let completedIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             jobs[completedIndex].state = .completed
             jobs[completedIndex].stage = .finished
@@ -405,23 +434,24 @@ final class ConversionCoordinator: ObservableObject {
     private func transcodePipeline(for job: ConversionJob) async throws -> [URL] {
         let cacheSettings = settings
         let outputURLs = try cacheManager.intermediateTrackURLs(for: job, settings: cacheSettings)
-        let pending = try cacheManager.missingIntermediateTrackIndices(outputURLs)
+        let pending = try await cacheManager.missingIntermediateTrackIndices(outputURLs)
         let completedCount = outputURLs.count - pending.count
         let missing = Set(pending)
         let checkpoint = outputURLs.indices.last { !missing.contains($0) } ?? -1
         let remaining = pending.filter { $0 > checkpoint }
         let item = completedCount > 0 ? "已复用 \(completedCount) 段转码缓存" : "准备转码"
         appendLog(jobID: job.id, "开始转码流水线：\(item)", persistImmediately: false)
-        update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completedCount, count: outputURLs.count, fileProgress: 0), currentItem: item)
+        let progress = Double(completedCount) / Double(outputURLs.count)
+        update(jobID: job.id, stage: .transcoding, total: progress, currentItem: item)
         try await transcodeTracks(remaining, for: job, outputURLs: outputURLs, completedCount: completedCount, cacheSettings: cacheSettings)
 
-        guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-        let gaps = try cacheManager.missingIntermediateTrackIndices(outputURLs)
+        try await waitUntilRunning(job.id)
+        let gaps = try await cacheManager.missingIntermediateTrackIndices(outputURLs)
         if !gaps.isEmpty {
             appendLog(jobID: job.id, "封装前补齐 \(gaps.count) 条缺失片段")
             try await transcodeTracks(gaps, for: job, outputURLs: outputURLs, completedCount: outputURLs.count - gaps.count, cacheSettings: cacheSettings)
-            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-            guard try cacheManager.missingIntermediateTrackIndices(outputURLs).isEmpty else {
+            try await waitUntilRunning(job.id)
+            guard try await cacheManager.missingIntermediateTrackIndices(outputURLs).isEmpty else {
                 throw ConversionError.missingIntermediateTracks
             }
         }
@@ -437,65 +467,127 @@ final class ConversionCoordinator: ObservableObject {
     ) async throws {
         let chapters = job.chapters
         var prefetchTasks: [Int: Task<URL, Error>] = [:]
-        defer {
-            prefetchTasks.values.forEach { $0.cancel() }
-        }
+        var downloadsByURL: [URL: Task<URL, Error>] = [:]
+        let sourceURLsByName = job.input.kind == .webDAV ? Dictionary(grouping: Set(chapters.map(\.sourceURL)), by: Self.sourceCacheName) : [:]
 
         func scheduleWebDAVPrefetches(from position: Int) {
             guard job.input.kind == .webDAV else { return }
-            let prefetchCount = min(max(cacheSettings.webDAVPrefetchCount, 1), 3)
-            let endPosition = min(indices.count, position + prefetchCount + 1)
+            let prefetchCount = max(cacheSettings.webDAVPrefetchCount, 1)
+            let endPosition = position + min(prefetchCount, indices.count - position)
             for prefetchIndex in indices[position..<endPosition] where prefetchTasks[prefetchIndex] == nil {
-                prefetchTasks[prefetchIndex] = Task {
-                    try await downloadChapter(chapters[prefetchIndex], job: job, cacheSettings: cacheSettings)
+                let chapter = chapters[prefetchIndex]
+                let url = chapter.sourceURL
+                if let existing = downloadsByURL[url] {
+                    prefetchTasks[prefetchIndex] = existing
+                } else {
+                    let disambiguate = (sourceURLsByName[Self.sourceCacheName(url)]?.count ?? 0) > 1
+                    let download = Task {
+                        try await downloadChapter(chapter, job: job, cacheSettings: cacheSettings, disambiguate: disambiguate)
+                    }
+                    downloadsByURL[url] = download
+                    prefetchTasks[prefetchIndex] = download
                 }
             }
         }
 
-        for (position, index) in indices.enumerated() {
-            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-            let chapter = chapters[index]
-            let completed = completedCount + position
-            let localSource: URL
-            if job.input.kind == .webDAV {
-                scheduleWebDAVPrefetches(from: position)
-                guard let prefetchTask = prefetchTasks[index] else {
-                    throw ConversionError.interrupted
-                }
-                localSource = try await prefetchTask.value
-                guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-                prefetchTasks[index] = nil
-                scheduleWebDAVPrefetches(from: position + 1)
-            } else {
-                localSource = chapter.sourceURL
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            var completed = completedCount
+            let concurrency = max(cacheSettings.transcodeConcurrency, 1)
+
+            @MainActor func recordCompletion(_ index: Int) {
+                completed += 1
+                guard let jobIndex = jobs.firstIndex(where: { $0.id == job.id }) else { return }
+                jobs[jobIndex].progress.total = Double(completed) / Double(chapters.count)
+                appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapters[index].title)")
             }
 
-            let outputURL = outputURLs[index]
-            try cacheManager.removeIntermediateTrack(at: outputURL)
-            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completed, count: chapters.count, fileProgress: 0), currentItem: chapter.title)
-            appendLog(jobID: job.id, "转码音轨 \(index + 1)/\(chapters.count)：\(chapter.title)，编码器 \(ffmpegRunner.audioEncoderName(for: job.encodingSettings))")
-            _ = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
-                Task { @MainActor in
-                    self?.applyTrackProgress(jobID: job.id, chapter: chapter, completed: completed, count: chapters.count, progress: progress)
+            do {
+                scheduleWebDAVPrefetches(from: 0)
+                for (position, index) in indices.enumerated() {
+                    try await waitUntilRunning(job.id)
+                    if position >= concurrency, let finished = try await group.next() {
+                        recordCompletion(finished)
+                    }
+
+                    let chapter = chapters[index]
+                    let source: URL
+                    if job.input.kind == .webDAV {
+                        guard let download = prefetchTasks[index] else { throw ConversionError.interrupted }
+                        source = try await withTaskCancellationHandler {
+                            try await download.value
+                        } onCancel: {
+                            download.cancel()
+                        }
+                        prefetchTasks[index] = nil
+                        try await waitUntilRunning(job.id)
+                        scheduleWebDAVPrefetches(from: position + 1)
+                    } else {
+                        source = chapter.sourceURL
+                    }
+
+                    let output = outputURLs[index]
+                    group.addTask {
+                        try await self.transcodeChapter(chapter, source: source, output: output, job: job)
+                        return index
+                    }
                 }
+                for try await finished in group {
+                    recordCompletion(finished)
+                }
+            } catch {
+                group.cancelAll()
+                ffmpegRunner.terminate(jobID: job.id)
+                for download in prefetchTasks.values {
+                    download.cancel()
+                }
+                for download in prefetchTasks.values {
+                    _ = await download.result
+                }
+                throw error
             }
-            try cacheManager.markIntermediateTrackComplete(at: outputURL)
-            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
-            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completed, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
-            appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapter.title)")
         }
     }
 
-    private func downloadChapter(_ chapter: Chapter, job: ConversionJob, cacheSettings: AppSettings) async throws -> URL {
+    private func transcodeChapter(_ chapter: Chapter, source: URL, output: URL, job: ConversionJob) async throws {
+        try await waitUntilRunning(job.id)
+        try cacheManager.removeIntermediateTrack(at: output)
+        if let index = jobs.firstIndex(where: { $0.id == job.id }) {
+            jobs[index].progress.currentItem = chapter.title
+            jobs[index].progress.currentFile = 0
+        }
+        let encoder = await ffmpegRunner.audioEncoderName(for: job.encodingSettings)
+        try await waitUntilRunning(job.id)
+        appendLog(jobID: job.id, "转码音轨 \(chapter.order + 1)/\(job.chapters.count)：\(chapter.title)，编码器 \(encoder)", persistImmediately: false)
+        _ = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: source, outputURL: output, encodingSettings: job.encodingSettings) { [weak self] progress in
+            Task { @MainActor in
+                self?.applyTrackProgress(jobID: job.id, chapter: chapter, progress: progress)
+            }
+        }
+        try cacheManager.markIntermediateTrackComplete(at: output)
+    }
+
+    private func waitUntilRunning(_ jobID: UUID) async throws {
+        while currentState(jobID: jobID) == .paused {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try Task.checkCancellation()
+        guard currentState(jobID: jobID) == .running else { throw ConversionError.interrupted }
+    }
+
+    private static func sourceCacheName(_ url: URL) -> String {
+        url.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    private func downloadChapter(_ chapter: Chapter, job: ConversionJob, cacheSettings: AppSettings, disambiguate: Bool) async throws -> URL {
         try Task.checkCancellation()
         let item = StorageItem(url: chapter.sourceURL, name: chapter.title, isDirectory: false, size: 0, modifiedAt: nil)
-        let localURL = try cacheManager.localURLForCachedRemote(chapter.sourceURL, job: job, settings: cacheSettings)
+        let localURL = try cacheManager.localURLForCachedRemote(chapter.sourceURL, jobID: job.id, settings: cacheSettings, disambiguate: disambiguate)
         if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
             registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
             return localURL
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
-        appendLog(jobID: job.id, "开始 WebDAV 下载：\(chapter.sourceURL.lastPathComponent)")
+        appendLog(jobID: job.id, "开始 WebDAV 下载：\(chapter.sourceURL.lastPathComponent)", persistImmediately: false)
         let maxRetries = max(cacheSettings.webDAVMaxRetries, 0)
         let timeout = max(cacheSettings.webDAVStallTimeoutSeconds, 5)
         var attempt = 0
@@ -522,7 +614,7 @@ final class ConversionCoordinator: ObservableObject {
             }
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
-        appendLog(jobID: job.id, "WebDAV 下载完成：\(chapter.sourceURL.lastPathComponent)")
+        appendLog(jobID: job.id, "WebDAV 下载完成：\(chapter.sourceURL.lastPathComponent)", persistImmediately: false)
         return localURL
     }
 
@@ -554,8 +646,10 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private func applyFFmpegProgress(jobID: UUID, progress: FFmpegProgress) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }),
+              jobs[index].state == .running,
+              jobs[index].stage == .packaging else { return }
         guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
-        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         jobs[index].progress.total = max(jobs[index].progress.total, 1)
         jobs[index].progress.currentFile = progress.currentFile
         jobs[index].progress.speed = progress.speed
@@ -564,19 +658,14 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.logTail = progress.logLine
         appendFFmpegLogIfNeeded(jobID: jobID, progress: progress)
         jobs[index].updatedAt = Date()
-        persist()
     }
 
-    private func applyTrackProgress(jobID: UUID, chapter: Chapter, completed: Int, count: Int, progress: FFmpegProgress) {
+    private func applyTrackProgress(jobID: UUID, chapter: Chapter, progress: FFmpegProgress) {
         guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }),
               jobs[jobIndex].state == .running,
               jobs[jobIndex].stage == .transcoding,
               jobs[jobIndex].progress.currentItem == chapter.title,
               shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
-        jobs[jobIndex].progress.total = max(
-            jobs[jobIndex].progress.total,
-            transcodeProgress(completed: completed, count: count, fileProgress: progress.currentFile)
-        )
         jobs[jobIndex].progress.currentFile = progress.currentFile
         jobs[jobIndex].progress.speed = progress.speed
         jobs[jobIndex].progress.eta = progress.eta
@@ -584,7 +673,6 @@ final class ConversionCoordinator: ObservableObject {
         jobs[jobIndex].progress.logTail = progress.logLine
         appendFFmpegLogIfNeeded(jobID: jobID, progress: progress)
         jobs[jobIndex].updatedAt = Date()
-        persist()
     }
 
     private func shouldApplyFFmpegProgress(jobID: UUID, progress: FFmpegProgress) -> Bool {
@@ -617,7 +705,12 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private func updateDownloadProgress(jobID: UUID, chapter: Chapter, transfer: TransferProgress) {
-        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }), jobs[index].state == .running else { return }
+        let now = ContinuousClock.now
+        if let lastUpdate = lastDownloadUpdateByJobID[jobID], now - lastUpdate < .milliseconds(350) {
+            return
+        }
+        lastDownloadUpdateByJobID[jobID] = now
         let transferred = transfer.bytesTransferred.formattedBytes
         let expected = transfer.totalBytes?.formattedBytes ?? "未知大小"
         if jobs[index].stage.allowsDownloadProgressToDriveMainProgress {
@@ -630,7 +723,6 @@ final class ConversionCoordinator: ObservableObject {
         jobs[index].progress.diagnostic = "WebDAV 下载 \(chapter.sourceURL.lastPathComponent)：\(transferred) / \(expected)"
         appendLog(jobID: jobID, jobs[index].progress.diagnostic, persistImmediately: false)
         jobs[index].updatedAt = Date()
-        persist()
     }
 
     private func updateDownloadRetry(jobID: UUID, chapter: Chapter, attempt: Int, maxRetries: Int, error: Error) {
@@ -648,27 +740,19 @@ final class ConversionCoordinator: ObservableObject {
     private func registerCacheEntry(jobID: UUID, item: StorageItem, localURL: URL, state: CacheEntryState) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         let cachedSize = state == .ready ? localFileSize(at: localURL) : nil
-        let entry = CacheEntry(remoteURL: item.url, localURL: localURL, byteSize: cachedSize ?? item.size, modifiedAt: item.modifiedAt, state: state, checksum: nil)
         if let entryIndex = jobs[index].cacheEntries.firstIndex(where: { $0.remoteURL == item.url }) {
+            var entry = jobs[index].cacheEntries[entryIndex]
+            guard entry.localURL != localURL || entry.state != state || entry.byteSize != (cachedSize ?? item.size) else { return }
+            entry.localURL = localURL
+            entry.state = state
+            entry.byteSize = cachedSize ?? item.size
             jobs[index].cacheEntries[entryIndex] = entry
         } else {
+            let entry = CacheEntry(remoteURL: item.url, localURL: localURL, byteSize: cachedSize ?? item.size, modifiedAt: item.modifiedAt, state: state, checksum: nil)
             jobs[index].cacheEntries.append(entry)
         }
-        jobs[index].cacheEntries = orderedCacheEntries(for: jobs[index])
         jobs[index].updatedAt = Date()
         persist()
-    }
-
-    private func orderedCacheEntries(for job: ConversionJob) -> [CacheEntry] {
-        let orderByURL = Dictionary(uniqueKeysWithValues: normalizedChapters(job.chapters).enumerated().map { ($0.element.sourceURL, $0.offset) })
-        return job.cacheEntries.sorted { lhs, rhs in
-            let lhsOrder = orderByURL[lhs.remoteURL] ?? Int.max
-            let rhsOrder = orderByURL[rhs.remoteURL] ?? Int.max
-            if lhsOrder != rhsOrder {
-                return lhsOrder < rhsOrder
-            }
-            return lhs.remoteURL.lastPathComponent.localizedStandardCompare(rhs.remoteURL.lastPathComponent) == .orderedAscending
-        }
     }
 
     private func localFileSize(at url: URL) -> Int64? {
@@ -720,7 +804,7 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private func persist() {
-        store.save(PersistedState(jobs: jobs, settings: settings, webDAVCredentials: webDAVCredentials))
+        store.scheduleSave(PersistedState(jobs: jobs, settings: settings, webDAVCredentials: webDAVCredentials))
     }
 
     private func normalizeRecoveredJobs() {
@@ -739,11 +823,6 @@ final class ConversionCoordinator: ObservableObject {
 
     private static func isAudioFile(_ url: URL) -> Bool {
         MediaFileTypes.isAudioFile(url)
-    }
-
-    private func transcodeProgress(completed: Int, count: Int, fileProgress: Double) -> Double {
-        let boundedFileProgress = min(max(fileProgress, 0), 1)
-        return (Double(completed) + boundedFileProgress) / Double(max(count, 1))
     }
 
     private static func safeFileName(_ value: String) -> String {
