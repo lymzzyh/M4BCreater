@@ -22,32 +22,42 @@ final class CacheManager {
         return directory
     }
 
-    func intermediateTrackURL(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> URL {
-        let fileName = "\(String(format: "%04d", chapter.order + 1))-\(chapter.id.uuidString).m4a"
-        return try intermediateDirectory(for: job, settings: settings).appending(path: fileName)
+    func intermediateTrackURLs(for job: ConversionJob, settings: AppSettings) throws -> [URL] {
+        let directory = try intermediateDirectory(for: job, settings: settings)
+        return job.chapters.map { chapter in
+            let fileName = "\(String(format: "%04d", chapter.order + 1))-\(chapter.id.uuidString).m4a"
+            return directory.appending(path: fileName)
+        }
     }
 
-    func intermediateDoneURL(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> URL {
-        try intermediateTrackURL(for: job, chapter: chapter, settings: settings).appendingPathExtension("done")
+    func missingIntermediateTrackIndices(_ trackURLs: [URL]) throws -> [Int] {
+        guard let directory = trackURLs.first?.deletingLastPathComponent() else { return [] }
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        let files = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys))
+        let fileNames = Set(files.compactMap { url -> String? in
+            guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true else {
+                return nil
+            }
+            if url.pathExtension == "m4a", (values.fileSize ?? 0) == 0 { return nil }
+            return url.lastPathComponent
+        })
+        return trackURLs.indices.filter { index in
+            let fileName = trackURLs[index].lastPathComponent
+            return !fileNames.contains(fileName) || !fileNames.contains(fileName + ".done")
+        }
     }
 
-    func intermediateTrackIsComplete(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws -> Bool {
-        let outputURL = try intermediateTrackURL(for: job, chapter: chapter, settings: settings)
-        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
-        return fileManager.fileExists(atPath: outputURL.path(percentEncoded: false))
-            && fileManager.fileExists(atPath: doneURL.path(percentEncoded: false))
-    }
-
-    func markIntermediateTrackComplete(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws {
-        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
+    func markIntermediateTrackComplete(at outputURL: URL) throws {
+        let doneURL = outputURL.appendingPathExtension("done")
         try Data(Date().ISO8601Format().utf8).write(to: doneURL, options: [.atomic])
     }
 
-    func removeIntermediateTrack(for job: ConversionJob, chapter: Chapter, settings: AppSettings) throws {
-        let outputURL = try intermediateTrackURL(for: job, chapter: chapter, settings: settings)
-        let doneURL = try intermediateDoneURL(for: job, chapter: chapter, settings: settings)
-        try? fileManager.removeItem(at: outputURL)
-        try? fileManager.removeItem(at: doneURL)
+    func removeIntermediateTrack(at outputURL: URL) throws {
+        for url in [outputURL.appendingPathExtension("done"), outputURL] {
+            if fileManager.fileExists(atPath: url.path(percentEncoded: false)) {
+                try fileManager.removeItem(at: url)
+            }
+        }
     }
 
     func finalOutputURL(for job: ConversionJob, settings: AppSettings) throws -> URL {

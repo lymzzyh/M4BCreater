@@ -406,6 +406,98 @@ struct StorageAndCacheTests {
             try manager.ensureCapacity(settings: settings, additionalBytes: 11)
         }
     }
+
+    @Test(.timeLimit(.minutes(1)))
+    func resumedWebDAVJobSkipsCompletedTracksAndRepairsGapsBeforePackaging() async throws {
+        let runner = FFmpegRunner()
+        guard let ffmpeg = runner.bundledFFmpegURL(), let ffprobe = runner.bundledFFprobeURL() else { return }
+
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = root.appending(path: "fixture.m4a")
+        try await runner.run(
+            jobID: UUID(),
+            executable: ffmpeg,
+            arguments: ["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "0.2", "-c:a", "aac", fixture.path(percentEncoded: false)],
+            progressDuration: 0.2
+        ) { _ in }
+
+        let inputURL = try #require(URL(string: "http://127.0.0.1:1/dav/"))
+        let outputDirectory = root.appending(path: "output", directoryHint: .isDirectory)
+        let chapters = (0..<5).map { index in
+            Chapter(title: "Track \(index + 1)", sourceURL: inputURL.appending(path: "track-\(index + 1).m4a"), duration: 0, order: index)
+        }
+        let job = ConversionJob(
+            title: "Book",
+            input: StorageLocation(kind: .webDAV, displayName: "WebDAV", url: inputURL),
+            output: StorageLocation(kind: .local, displayName: "Output", url: outputDirectory),
+            metadata: BookMetadata(title: "Book", author: "", narrator: "", album: "Book", description: "", coverURL: nil),
+            chapters: chapters,
+            state: .paused,
+            stage: .transcoding,
+            hasStarted: true,
+            outputFileName: "Book.m4b"
+        )
+        let settings = AppSettings(
+            cacheDirectory: root.appending(path: "cache", directoryHint: .isDirectory),
+            cacheLimitBytes: 1_000_000,
+            autoCleanCompletedCache: false,
+            webDAVMaxRetries: 0,
+            webDAVStallTimeoutSeconds: 5
+        )
+        let cache = CacheManager()
+        let tracks = try cache.intermediateTrackURLs(for: job, settings: settings)
+        let existingMarker = Data("old checkpoint".utf8)
+        for index in [0, 3] {
+            try FileManager.default.copyItem(at: fixture, to: tracks[index])
+            try existingMarker.write(to: tracks[index].appendingPathExtension("done"))
+        }
+        try existingMarker.write(to: tracks[1].appendingPathExtension("done"))
+        try Data().write(to: tracks[2])
+        try existingMarker.write(to: tracks[2].appendingPathExtension("done"))
+        #expect(try cache.missingIntermediateTrackIndices(tracks) == [1, 2, 4])
+        for index in [1, 2, 4] {
+            let source = try cache.localURLForCachedRemote(chapters[index].sourceURL, job: job, settings: settings)
+            try FileManager.default.copyItem(at: fixture, to: source)
+        }
+
+        let store = JobStore(directory: root.appending(path: "state", directoryHint: .isDirectory))
+        store.save(PersistedState(jobs: [job], settings: settings, webDAVCredentials: []))
+        let coordinator = ConversionCoordinator(store: store)
+        coordinator.resume(jobID: job.id)
+        let deadline = ContinuousClock.now + .seconds(12)
+        while coordinator.jobs.first?.state == .running && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        let finished = try #require(coordinator.jobs.first)
+        try #require(finished.state == .completed, "\(finished.errorMessage ?? "任务仍在运行")")
+        let conversions = finished.progress.eventLog.compactMap { line in
+            chapters.indices.first { line.contains("转码音轨 \($0 + 1)/\(chapters.count)：") }
+        }
+        #expect(conversions == [4, 1, 2])
+        #expect(try cache.missingIntermediateTrackIndices(tracks).isEmpty)
+        for index in [0, 3] {
+            #expect(try Data(contentsOf: tracks[index].appendingPathExtension("done")) == existingMarker)
+        }
+
+        let probe = Process()
+        let probeOutput = Pipe()
+        probe.executableURL = ffprobe
+        probe.arguments = ["-v", "error", "-show_chapters", "-of", "json", outputDirectory.appending(path: job.outputFileName).path(percentEncoded: false)]
+        probe.standardOutput = probeOutput
+        try probe.run()
+        let data = try probeOutput.fileHandleForReading.readToEnd()
+        let probeData = try #require(data)
+        probe.waitUntilExit()
+        try #require(probe.terminationStatus == 0)
+        let object = try JSONSerialization.jsonObject(with: probeData)
+        let result = try #require(object as? [String: Any])
+        let writtenChapters = try #require(result["chapters"] as? [[String: Any]])
+        let titles = writtenChapters.compactMap { ($0["tags"] as? [String: String])?["title"] }
+        #expect(titles == chapters.map(\.title))
+    }
 }
 
 private final class StallingDownloadProtocol: URLProtocol, @unchecked Sendable {

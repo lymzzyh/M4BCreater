@@ -9,7 +9,7 @@ final class ConversionCoordinator: ObservableObject {
     @Published var settings: AppSettings = .default
     @Published var webDAVCredentials: [WebDAVCredential] = []
 
-    private let store = JobStore()
+    private let store: JobStore
     private let credentialStore = CredentialStore()
     private let cacheManager = CacheManager()
     private let metadataService = MetadataService()
@@ -19,7 +19,8 @@ final class ConversionCoordinator: ObservableObject {
     private var lastFFmpegUIUpdateAtByJobID: [UUID: Date] = [:]
     private var lastFFmpegLogAtByJobID: [UUID: Date] = [:]
 
-    init() {
+    init(store: JobStore = JobStore()) {
+        self.store = store
         let state = store.load()
         jobs = state.jobs
         settings = state.settings
@@ -288,24 +289,20 @@ final class ConversionCoordinator: ObservableObject {
         do {
             guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
             var job = jobs[index]
+            job.chapters = normalizedChapters(job.chapters)
             update(jobID: jobID, stage: .buildingChapters, total: 0, currentItem: "校验章节清单")
-            let chapters = normalizedChapters(job.chapters)
-            appendLog(jobID: jobID, "校验章节：\(chapters.count) 条音轨")
+            appendLog(jobID: jobID, "校验章节：\(job.chapters.count) 条音轨")
 
-            guard !chapters.isEmpty else {
+            guard !job.chapters.isEmpty else {
                 throw ConversionError.noAudioFiles
             }
 
-            if let refreshed = jobs.first(where: { $0.id == jobID }) {
-                job = refreshed
-            }
-            update(jobID: jobID, stage: .transcoding, total: 0, currentItem: "准备转码")
-            appendLog(jobID: jobID, "开始转码流水线")
             let intermediateTracks = try await transcodePipeline(for: job)
+            guard currentState(jobID: jobID) == .running else { return }
 
             let volumePlans = Self.volumePlans(
                 baseFileName: job.outputFileName,
-                chapters: normalizedChapters(job.chapters),
+                chapters: job.chapters,
                 intermediateTracks: intermediateTracks,
                 splitSettings: job.volumeSplitSettings
             )
@@ -351,7 +348,9 @@ final class ConversionCoordinator: ObservableObject {
             appendLog(jobID: jobID, packagedOutputs.count > 1 ? "任务完成：输出 \(packagedOutputs.count) 卷" : "任务完成：\(jobs[completedIndex].outputFileName)")
             persist()
         } catch {
-            setFailure(jobID: jobID, error: error)
+            if currentState(jobID: jobID) == .running {
+                setFailure(jobID: jobID, error: error)
+            }
         }
     }
 
@@ -404,78 +403,101 @@ final class ConversionCoordinator: ObservableObject {
     }
 
     private func transcodePipeline(for job: ConversionJob) async throws -> [URL] {
-        let chapters = normalizedChapters(job.chapters)
-        var outputs: [URL] = []
+        let cacheSettings = settings
+        let outputURLs = try cacheManager.intermediateTrackURLs(for: job, settings: cacheSettings)
+        let pending = try cacheManager.missingIntermediateTrackIndices(outputURLs)
+        let completedCount = outputURLs.count - pending.count
+        let missing = Set(pending)
+        let checkpoint = outputURLs.indices.last { !missing.contains($0) } ?? -1
+        let remaining = pending.filter { $0 > checkpoint }
+        let item = completedCount > 0 ? "已复用 \(completedCount) 段转码缓存" : "准备转码"
+        appendLog(jobID: job.id, "开始转码流水线：\(item)", persistImmediately: false)
+        update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completedCount, count: outputURLs.count, fileProgress: 0), currentItem: item)
+        try await transcodeTracks(remaining, for: job, outputURLs: outputURLs, completedCount: completedCount, cacheSettings: cacheSettings)
+
+        guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
+        let gaps = try cacheManager.missingIntermediateTrackIndices(outputURLs)
+        if !gaps.isEmpty {
+            appendLog(jobID: job.id, "封装前补齐 \(gaps.count) 条缺失片段")
+            try await transcodeTracks(gaps, for: job, outputURLs: outputURLs, completedCount: outputURLs.count - gaps.count, cacheSettings: cacheSettings)
+            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
+            guard try cacheManager.missingIntermediateTrackIndices(outputURLs).isEmpty else {
+                throw ConversionError.missingIntermediateTracks
+            }
+        }
+        return outputURLs
+    }
+
+    private func transcodeTracks(
+        _ indices: [Int],
+        for job: ConversionJob,
+        outputURLs: [URL],
+        completedCount: Int,
+        cacheSettings: AppSettings
+    ) async throws {
+        let chapters = job.chapters
         var prefetchTasks: [Int: Task<URL, Error>] = [:]
         defer {
             prefetchTasks.values.forEach { $0.cancel() }
         }
 
-        func scheduleWebDAVPrefetches(from startIndex: Int) {
+        func scheduleWebDAVPrefetches(from position: Int) {
             guard job.input.kind == .webDAV else { return }
-            let prefetchCount = min(max(settings.webDAVPrefetchCount, 1), 3)
-            let endIndex = min(chapters.count, startIndex + prefetchCount + 1)
-            guard startIndex < endIndex else { return }
-            for prefetchIndex in startIndex..<endIndex where prefetchTasks[prefetchIndex] == nil {
+            let prefetchCount = min(max(cacheSettings.webDAVPrefetchCount, 1), 3)
+            let endPosition = min(indices.count, position + prefetchCount + 1)
+            for prefetchIndex in indices[position..<endPosition] where prefetchTasks[prefetchIndex] == nil {
                 prefetchTasks[prefetchIndex] = Task {
-                    try await downloadChapter(chapters[prefetchIndex], job: job, position: prefetchIndex, totalCount: chapters.count)
+                    try await downloadChapter(chapters[prefetchIndex], job: job, cacheSettings: cacheSettings)
                 }
             }
         }
 
-        for index in chapters.indices {
+        for (position, index) in indices.enumerated() {
             guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
             let chapter = chapters[index]
+            let completed = completedCount + position
             let localSource: URL
             if job.input.kind == .webDAV {
-                scheduleWebDAVPrefetches(from: index)
+                scheduleWebDAVPrefetches(from: position)
                 guard let prefetchTask = prefetchTasks[index] else {
                     throw ConversionError.interrupted
                 }
                 localSource = try await prefetchTask.value
+                guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
                 prefetchTasks[index] = nil
-                scheduleWebDAVPrefetches(from: index + 1)
+                scheduleWebDAVPrefetches(from: position + 1)
             } else {
                 localSource = chapter.sourceURL
             }
 
-            let outputURL = try cacheManager.intermediateTrackURL(for: job, chapter: chapter, settings: settings)
-            if try cacheManager.intermediateTrackIsComplete(for: job, chapter: chapter, settings: settings) {
-                appendLog(jobID: job.id, "跳过已完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
-                update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
-                outputs.append(outputURL)
-                continue
-            }
-            if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
-                appendLog(jobID: job.id, "清理未完成转码片段 \(index + 1)/\(chapters.count)：\(chapter.title)")
-                try cacheManager.removeIntermediateTrack(for: job, chapter: chapter, settings: settings)
-            }
-            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 0), currentItem: chapter.title)
+            let outputURL = outputURLs[index]
+            try cacheManager.removeIntermediateTrack(at: outputURL)
+            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completed, count: chapters.count, fileProgress: 0), currentItem: chapter.title)
             appendLog(jobID: job.id, "转码音轨 \(index + 1)/\(chapters.count)：\(chapter.title)，编码器 \(ffmpegRunner.audioEncoderName(for: job.encodingSettings))")
-            let encoded = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
+            _ = try await ffmpegRunner.transcodeTrack(jobID: job.id, sourceURL: localSource, outputURL: outputURL, encodingSettings: job.encodingSettings) { [weak self] progress in
                 Task { @MainActor in
-                    self?.applyTrackProgress(jobID: job.id, chapter: chapter, index: index, count: chapters.count, progress: progress)
+                    self?.applyTrackProgress(jobID: job.id, chapter: chapter, completed: completed, count: chapters.count, progress: progress)
                 }
             }
-            try cacheManager.markIntermediateTrackComplete(for: job, chapter: chapter, settings: settings)
-            outputs.append(encoded)
-            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(index: index, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
+            try cacheManager.markIntermediateTrackComplete(at: outputURL)
+            guard currentState(jobID: job.id) == .running else { throw ConversionError.interrupted }
+            update(jobID: job.id, stage: .transcoding, total: transcodeProgress(completed: completed, count: chapters.count, fileProgress: 1), currentItem: chapter.title)
             appendLog(jobID: job.id, "转码完成 \(index + 1)/\(chapters.count)：\(chapter.title)")
         }
-        return outputs
     }
 
-    private func downloadChapter(_ chapter: Chapter, job: ConversionJob, position: Int, totalCount: Int) async throws -> URL {
+    private func downloadChapter(_ chapter: Chapter, job: ConversionJob, cacheSettings: AppSettings) async throws -> URL {
+        try Task.checkCancellation()
         let item = StorageItem(url: chapter.sourceURL, name: chapter.title, isDirectory: false, size: 0, modifiedAt: nil)
-        let localURL = try cacheManager.localURLForCachedRemote(chapter.sourceURL, job: job, settings: settings)
+        let localURL = try cacheManager.localURLForCachedRemote(chapter.sourceURL, job: job, settings: cacheSettings)
         if FileManager.default.fileExists(atPath: localURL.path(percentEncoded: false)) {
             registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .ready)
             return localURL
         }
         registerCacheEntry(jobID: job.id, item: item, localURL: localURL, state: .downloading)
         appendLog(jobID: job.id, "开始 WebDAV 下载：\(chapter.sourceURL.lastPathComponent)")
-        let maxRetries = max(settings.webDAVMaxRetries, 0)
-        let timeout = max(settings.webDAVStallTimeoutSeconds, 5)
+        let maxRetries = max(cacheSettings.webDAVMaxRetries, 0)
+        let timeout = max(cacheSettings.webDAVStallTimeoutSeconds, 5)
         var attempt = 0
         while true {
             do {
@@ -545,13 +567,15 @@ final class ConversionCoordinator: ObservableObject {
         persist()
     }
 
-    private func applyTrackProgress(jobID: UUID, chapter: Chapter, index: Int, count: Int, progress: FFmpegProgress) {
-        guard shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
-        guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        jobs[jobIndex].stage = .transcoding
+    private func applyTrackProgress(jobID: UUID, chapter: Chapter, completed: Int, count: Int, progress: FFmpegProgress) {
+        guard let jobIndex = jobs.firstIndex(where: { $0.id == jobID }),
+              jobs[jobIndex].state == .running,
+              jobs[jobIndex].stage == .transcoding,
+              jobs[jobIndex].progress.currentItem == chapter.title,
+              shouldApplyFFmpegProgress(jobID: jobID, progress: progress) else { return }
         jobs[jobIndex].progress.total = max(
             jobs[jobIndex].progress.total,
-            transcodeProgress(index: index, count: count, fileProgress: progress.currentFile)
+            transcodeProgress(completed: completed, count: count, fileProgress: progress.currentFile)
         )
         jobs[jobIndex].progress.currentFile = progress.currentFile
         jobs[jobIndex].progress.speed = progress.speed
@@ -717,9 +741,9 @@ final class ConversionCoordinator: ObservableObject {
         MediaFileTypes.isAudioFile(url)
     }
 
-    private func transcodeProgress(index: Int, count: Int, fileProgress: Double) -> Double {
+    private func transcodeProgress(completed: Int, count: Int, fileProgress: Double) -> Double {
         let boundedFileProgress = min(max(fileProgress, 0), 1)
-        return (Double(index) + boundedFileProgress) / Double(max(count, 1))
+        return (Double(completed) + boundedFileProgress) / Double(max(count, 1))
     }
 
     private static func safeFileName(_ value: String) -> String {
@@ -821,6 +845,7 @@ final class ConversionCoordinator: ObservableObject {
 enum ConversionError: LocalizedError {
     case noAudioFiles
     case interrupted
+    case missingIntermediateTracks
 
     var errorDescription: String? {
         switch self {
@@ -828,6 +853,8 @@ enum ConversionError: LocalizedError {
             "输入目录中没有找到可转换的音频文件。"
         case .interrupted:
             "任务已暂停或取消。"
+        case .missingIntermediateTracks:
+            "仍有缺失的转码片段，无法封装。"
         }
     }
 }

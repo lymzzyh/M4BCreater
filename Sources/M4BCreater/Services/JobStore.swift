@@ -30,9 +30,9 @@ final class JobStore {
     private let stateURL: URL
     private let backupURL: URL
 
-    init() {
+    init(directory: URL? = nil) {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let directory = appSupport.appending(path: "M4BCreater", directoryHint: .isDirectory)
+        let directory = directory ?? appSupport.appending(path: "M4BCreater", directoryHint: .isDirectory)
         self.stateURL = directory.appending(path: "state.json")
         self.backupURL = directory.appending(path: "state.json.bak")
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
