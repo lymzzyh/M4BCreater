@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="M4BCreater"
 BUNDLE_ID="com.m4bcreater.app"
-VERSION="0.1.0"
+VERSION="1.0.0"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
